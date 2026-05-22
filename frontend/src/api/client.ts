@@ -211,6 +211,7 @@ export function getAnalytics(
 // Image URL helper
 // ---------------------------------------------------------------------------
 export function rowImageUrl(imagePath: string): string {
+  if (/^https?:\/\//i.test(imagePath)) return imagePath
   // imagePath is an absolute server-side path; serve via /static
   const filename = imagePath.split(/[/\\]/).pop() ?? ''
   return `${BASE}/static/row_images/${filename}`

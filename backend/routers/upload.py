@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from models import ExtractedOperation, Upload
+from services.cloud_storage import upload_review_image
 from services.ocr_service import extract_from_image
 from services.pdf_processor import pdf_to_images, resolve_poppler_path
 
@@ -84,6 +85,7 @@ def _process_upload(upload_id: str, pdf_path: str, db_url: str) -> None:
             logger.info("=" * 70)
             logger.info("PROCESSING PAGE %d/%d: %s", page_num, len(image_paths), image_path)
             logger.info("=" * 70)
+            review_image_path = upload_review_image(image_path, upload_id, page_num) or image_path
             
             try:
                 result = extract_from_image(image_path)
@@ -153,7 +155,7 @@ def _process_upload(upload_id: str, pdf_path: str, db_url: str) -> None:
                     },
                     corrected_json=None,
                     review_status="EXTRACTED",
-                    row_image_path=image_path,
+                    row_image_path=review_image_path,
                 )
                 db.add(op)
                 total_rows += 1
@@ -360,6 +362,7 @@ def _retry_page_background(upload_id: str, page_num: int, image_path: str, db_ur
 
     try:
         logger.info("Retrying OCR for upload %s page %d", upload_id, page_num)
+        review_image_path = upload_review_image(image_path, upload_id, page_num) or image_path
         result = extract_from_image(image_path)
 
         if result.get("error"):
@@ -421,7 +424,7 @@ def _retry_page_background(upload_id: str, page_num: int, image_path: str, db_ur
                 },
                 corrected_json=None,
                 review_status="EXTRACTED",
-                row_image_path=image_path,
+                row_image_path=review_image_path,
             )
             db.add(op)
             rows_added += 1
@@ -511,6 +514,8 @@ def delete_upload(upload_id: str, db: Session = Depends(get_db)):
     rows = db.query(ExtractedOperation).filter(ExtractedOperation.upload_id == upload_id).all()
     deleted_files = set()
     for row in rows:
+        if row.row_image_path and row.row_image_path.startswith(("http://", "https://")):
+            continue
         if row.row_image_path and row.row_image_path not in deleted_files:
             try:
                 os.remove(row.row_image_path)
