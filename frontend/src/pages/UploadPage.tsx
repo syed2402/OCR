@@ -118,9 +118,9 @@ export default function UploadPage() {
   const failed = active?.status?.status === 'FAILED'
 
   return (
-    <div className="p-8 max-w-4xl mx-auto">
-      <div className="mb-8">
-        <h2 className="text-2xl font-bold text-gray-900">Upload Audit Sheet</h2>
+    <div className="mx-auto max-w-4xl p-4 sm:p-6 lg:p-8">
+      <div className="mb-5 sm:mb-8">
+        <h2 className="text-xl font-bold text-gray-900 sm:text-2xl">Upload Audit Sheet</h2>
         <p className="text-gray-500 mt-1 text-sm">
           Upload a Stellantis audit PDF. Gemini Vision will extract all operation rows for your review.
         </p>
@@ -129,7 +129,7 @@ export default function UploadPage() {
       {/* Drop zone */}
       <div
         {...getRootProps()}
-        className={`card p-10 text-center cursor-pointer border-2 border-dashed transition-all ${
+        className={`card cursor-pointer border-2 border-dashed p-6 text-center transition-all sm:p-10 ${
           isDragActive
             ? 'border-blue-500 bg-blue-50'
             : 'border-gray-300 hover:border-blue-400 hover:bg-gray-50'
@@ -137,14 +137,14 @@ export default function UploadPage() {
       >
         <input {...getInputProps()} />
         <div className="flex flex-col items-center gap-3">
-          <div className="w-14 h-14 bg-blue-100 rounded-full flex items-center justify-center">
+          <div className="flex h-12 w-12 items-center justify-center rounded-full bg-blue-100 sm:h-14 sm:w-14">
             <Upload className="text-blue-600" size={24} />
           </div>
           {isDragActive ? (
             <p className="text-blue-600 font-medium">Drop the PDF here…</p>
           ) : (
             <>
-              <p className="font-medium text-gray-700">Drag & drop a PDF, or click to browse</p>
+              <p className="font-medium text-gray-700">Tap to browse, or drag & drop a PDF</p>
               <p className="text-sm text-gray-400">Torque Audit Sheet · Process Audit Check Sheet</p>
             </>
           )}
@@ -154,7 +154,7 @@ export default function UploadPage() {
       {/* Active upload progress */}
       {active && (
         <div className="card mt-6 p-5">
-          <div className="flex items-start gap-4">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
             <div className="shrink-0 mt-0.5">
               {processing && (
                 <div className="w-8 h-8 border-3 border-blue-500 border-t-transparent rounded-full animate-spin" />
@@ -163,7 +163,7 @@ export default function UploadPage() {
               {failed && <XCircle className="text-red-500" size={32} />}
             </div>
             <div className="flex-1 min-w-0">
-              <div className="flex items-center justify-between gap-4">
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <p className="font-semibold text-gray-800 truncate">{active.filename}</p>
                   <p className="text-sm text-gray-500 mt-0.5">
@@ -175,7 +175,7 @@ export default function UploadPage() {
                 </div>
                 {completed && (
                   <button
-                    className="btn-primary flex items-center gap-2 whitespace-nowrap"
+                    className="btn-primary flex w-full items-center justify-center gap-2 whitespace-nowrap sm:w-auto"
                     onClick={() => navigate(`/review/${active.uploadId}`)}
                   >
                     Review Rows <ArrowRight size={16} />
@@ -201,7 +201,7 @@ export default function UploadPage() {
       )}
 
       {/* Tip */}
-      <div className="mt-4 flex items-start gap-2 text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-4 py-3">
+      <div className="mt-4 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">
         <AlertCircle size={16} className="shrink-0 mt-0.5" />
         <span>
           After extraction, all rows must be reviewed and approved before they appear in analytics.
@@ -214,7 +214,7 @@ export default function UploadPage() {
           <h3 className="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">
             Recent Uploads
           </h3>
-          <div className="card divide-y divide-gray-100">
+          <div className="card divide-y divide-gray-100 overflow-hidden">
             {history.map((u) => (
               <UploadRow
                 key={u.upload_id}
@@ -285,7 +285,7 @@ function UploadRow({ upload, onNavigate, onDeleted }: { upload: UploadSummary; o
 
   return (
     <div>
-      <div className="flex items-center gap-3 px-5 py-3">
+      <div className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:px-5">
         <FileText size={16} className="text-gray-400 shrink-0" />
         <div className="flex-1 min-w-0">
           <p className="text-sm font-medium text-gray-800 truncate">{upload.original_filename}</p>
@@ -294,7 +294,7 @@ function UploadRow({ upload, onNavigate, onDeleted }: { upload: UploadSummary; o
             {upload.total_rows} rows
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2 sm:justify-end">
           {upload.status === 'COMPLETED' && <span className="status-approved">Completed</span>}
           {upload.status === 'PROCESSING' && (
             <span className="status-reviewed flex items-center gap-1">
@@ -303,12 +303,12 @@ function UploadRow({ upload, onNavigate, onDeleted }: { upload: UploadSummary; o
           )}
           {upload.status === 'FAILED' && <span className="status-rejected">Failed</span>}
           {(upload.status === 'COMPLETED' || upload.status === 'FAILED') && (
-            <button className="btn-secondary text-xs py-1" onClick={handleExpand}>
+            <button className="btn-secondary py-1 text-xs" onClick={handleExpand}>
               {expanded ? 'Hide pages' : 'Pages'}
             </button>
           )}
           {upload.status === 'COMPLETED' && (
-            <button className="btn-secondary text-xs py-1" onClick={onNavigate}>
+            <button className="btn-secondary py-1 text-xs" onClick={onNavigate}>
               Review
             </button>
           )}

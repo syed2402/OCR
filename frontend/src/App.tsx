@@ -33,7 +33,7 @@ function NavItem({
       <Icon size={18} className="shrink-0" />
       <span
         className={`whitespace-nowrap transition-all duration-200 ${
-          collapsed ? 'w-0 overflow-hidden opacity-0' : 'w-auto opacity-100'
+          collapsed ? 'md:w-0 md:overflow-hidden md:opacity-0' : 'w-auto opacity-100'
         }`}
       >
         {label}
@@ -48,11 +48,11 @@ function Sidebar() {
 
   return (
     <aside
-      className={`bg-blue-900 flex flex-col shrink-0 h-screen sticky top-0 transition-[width] duration-300 ease-in-out ${
-        collapsed ? 'w-16' : 'w-56'
+      className={`bg-blue-900 flex shrink-0 transition-[width] duration-300 ease-in-out md:h-screen md:sticky md:top-0 md:flex-col ${
+        collapsed ? 'md:w-16' : 'md:w-56'
       }`}
     >
-      <div className={`border-b border-blue-800 ${collapsed ? 'px-3 py-4' : 'px-5 py-5'}`}>
+      <div className={`hidden border-b border-blue-800 md:block ${collapsed ? 'px-3 py-4' : 'px-5 py-5'}`}>
         <div className="flex items-center justify-between gap-2">
           <div className={`min-w-0 transition-opacity duration-200 ${collapsed ? 'opacity-0 pointer-events-none w-0 overflow-hidden' : 'opacity-100'}`}>
             <p className="text-xs font-semibold text-blue-400 uppercase tracking-widest mb-1">
@@ -73,12 +73,12 @@ function Sidebar() {
           </button>
         </div>
       </div>
-      <nav className="flex-1 p-3 flex flex-col gap-1">
+      <nav className="flex w-full gap-1 overflow-x-auto p-2 md:flex-1 md:flex-col md:p-3">
         <NavItem to="/" icon={Upload} label="Upload" collapsed={collapsed} />
         <NavItem to="/review" icon={ClipboardCheck} label="Review" collapsed={collapsed} />
         <NavItem to="/analytics" icon={BarChart2} label="Analytics" collapsed={collapsed} />
       </nav>
-      <div className={`border-t border-blue-800 py-4 ${collapsed ? 'px-3' : 'px-5'}`}>
+      <div className={`hidden border-t border-blue-800 py-4 md:block ${collapsed ? 'px-3' : 'px-5'}`}>
         <p
           className={`text-blue-400 text-xs whitespace-nowrap transition-all duration-200 ${
             collapsed ? 'w-0 overflow-hidden opacity-0' : 'opacity-100'
@@ -207,9 +207,9 @@ export default function App() {
 
   return (
     <BrowserRouter>
-      <div className="flex min-h-screen bg-gray-50">
+      <div className="flex min-h-screen flex-col bg-gray-50 md:flex-row">
         <Sidebar />
-        <main className="flex-1 overflow-auto">
+        <main className="min-w-0 flex-1 overflow-auto">
           <Routes>
             <Route path="/" element={<UploadPage />} />
             <Route path="/review" element={<ReviewPage />} />

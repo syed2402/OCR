@@ -157,7 +157,7 @@ function UploadSelector({ onSelect }: { onSelect: (id: string) => void }) {
 
   if (uploads.length === 0)
     return (
-      <div className="p-8 text-center">
+      <div className="p-4 text-center sm:p-8">
         <p className="text-gray-500 mb-4">No completed uploads yet.</p>
         <button className="btn-primary" onClick={() => navigate('/')}>
           Upload a PDF
@@ -184,10 +184,10 @@ function UploadSelector({ onSelect }: { onSelect: (id: string) => void }) {
   }
 
   return (
-    <div className="p-8 max-w-5xl mx-auto">
-      <h2 className="text-xl font-bold mb-4">Select Upload to Review</h2>
-      <div className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
-        <table className="w-full border-collapse text-sm">
+    <div className="mx-auto max-w-5xl p-4 sm:p-8">
+      <h2 className="mb-4 text-xl font-bold">Select Upload to Review</h2>
+      <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white shadow-sm">
+        <table className="min-w-[760px] w-full border-collapse text-sm">
           <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
             <tr>
               <th className="w-20 border-r border-slate-200 px-4 py-3 text-left font-semibold">Sl No</th>
@@ -279,6 +279,7 @@ export default function ReviewPage() {
   const [imageRotation, setImageRotation] = useState(0)
   const [imagePan, setImagePan] = useState({ x: 0, y: 0 })
   const [isImagePanning, setIsImagePanning] = useState(false)
+  const [isCompactLayout, setIsCompactLayout] = useState(false)
   const [showConfidence, setShowConfidence] = useState(false)
   const [measurementColumnCount, setMeasurementColumnCount] = useState(0)
 
@@ -295,6 +296,14 @@ export default function ReviewPage() {
     })
     return () => cancelAnimationFrame(frame)
   }, [sheetPanelPercent])
+
+  useEffect(() => {
+    const query = window.matchMedia('(max-width: 1023px)')
+    const sync = () => setIsCompactLayout(query.matches)
+    sync()
+    query.addEventListener('change', sync)
+    return () => query.removeEventListener('change', sync)
+  }, [])
 
   // Load rows when uploadId is known — suspicious rows bubble to top
   useEffect(() => {
@@ -813,13 +822,13 @@ export default function ReviewPage() {
   }
 
   return (
-    <div className="flex flex-col h-screen">
+    <div className="flex min-h-screen flex-col lg:h-screen">
       {/* Top bar */}
-      <div className="bg-white border-b border-gray-200 px-6 py-3 flex items-center justify-between shrink-0">
+      <div className="flex shrink-0 flex-col gap-3 border-b border-gray-200 bg-white px-4 py-3 sm:px-6 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex items-center gap-4">
           <h2 className="font-semibold text-gray-800">OCR Review</h2>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-2 sm:gap-3">
           {/* Page navigation */}
           {pages.length > 1 && (
             <div className="flex items-center gap-1 bg-gray-100 rounded-lg px-2 py-1">
@@ -849,7 +858,7 @@ export default function ReviewPage() {
           </span>
           {pendingCount > 0 && (
             <button
-              className="btn-success py-1 px-3 flex items-center gap-1"
+              className="btn-success flex items-center gap-1 px-3 py-1"
               onClick={handleApproveAll}
               disabled={approvingAll}
               title="Approve all pending rows at once"
@@ -871,7 +880,7 @@ export default function ReviewPage() {
       </div>
 
       {/* Collapsible page row navigator */}
-      <div className="bg-gray-50 border-b border-gray-200 px-6 py-2 overflow-x-auto shrink-0">
+      <div className="shrink-0 overflow-x-auto border-b border-gray-200 bg-gray-50 px-4 py-2 sm:px-6">
         <div className="flex items-center gap-2">
           {pages.map((page) => {
             const pageRows = rows
@@ -929,12 +938,12 @@ export default function ReviewPage() {
       </div>
 
       {/* Spreadsheet review layout */}
-      <div ref={reviewLayoutRef} className="flex flex-1 overflow-hidden bg-white">
+      <div ref={reviewLayoutRef} className="flex flex-1 flex-col overflow-visible bg-white lg:flex-row lg:overflow-hidden">
         <div
-          className="min-w-0 shrink-0 flex flex-col bg-slate-50"
-          style={{ width: `calc(${sheetPanelPercent}% - 6px)` }}
+          className="flex min-h-[50vh] min-w-0 shrink-0 flex-col bg-slate-50 lg:min-h-0"
+          style={{ width: isCompactLayout ? '100%' : `calc(${sheetPanelPercent}% - 6px)` }}
         >
-          <div className="flex items-center gap-2 overflow-x-auto border-b border-slate-200 bg-white px-3 py-2">
+          <div className="flex flex-col gap-2 overflow-x-auto border-b border-slate-200 bg-white px-3 py-2 sm:flex-row sm:items-center">
             <button
               className={`rounded px-3 py-1.5 text-sm font-medium ${activeSheet === 'ALL' ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}`}
               onClick={() => setActiveSheet('ALL')}
@@ -942,7 +951,7 @@ export default function ReviewPage() {
             >
               All
             </button>
-            <div className="ml-auto flex shrink-0 items-center gap-3">
+            <div className="flex shrink-0 flex-wrap items-center gap-2 sm:ml-auto sm:gap-3">
               <label className="flex items-center gap-2 rounded border border-slate-200 px-2 py-1 text-xs font-medium text-slate-600">
                 <input
                   type="checkbox"
@@ -1021,7 +1030,7 @@ export default function ReviewPage() {
               color: #1d4ed8;
             }
           `}</style>
-          <div className="review-sheet ag-theme-quartz flex-1 min-h-0">
+          <div className="review-sheet ag-theme-quartz min-h-[360px] flex-1 lg:min-h-0">
             <AgGridReact<SheetRow>
               rowData={sheetRows}
               columnDefs={columnDefs}
@@ -1048,7 +1057,7 @@ export default function ReviewPage() {
           </div>
         </div>
         <div
-          className="group flex w-3 shrink-0 cursor-col-resize items-center justify-center border-x border-slate-300 bg-slate-200 hover:bg-blue-100"
+          className="group hidden w-3 shrink-0 cursor-col-resize items-center justify-center border-x border-slate-300 bg-slate-200 hover:bg-blue-100 lg:flex"
           onPointerDown={startPanelResize}
           role="separator"
           aria-orientation="vertical"
@@ -1218,10 +1227,10 @@ export default function ReviewPage() {
         </div>
 
         <div
-          className="min-w-0 shrink-0 flex flex-col overflow-hidden bg-slate-100"
-          style={{ width: `calc(${100 - sheetPanelPercent}% - 6px)` }}
+          className="flex min-h-[70vh] min-w-0 shrink-0 flex-col overflow-hidden bg-slate-100 lg:min-h-0"
+          style={{ width: isCompactLayout ? '100%' : `calc(${100 - sheetPanelPercent}% - 6px)` }}
         >
-          <div className="flex items-center justify-between gap-3 bg-slate-900 px-3 py-2 text-white">
+          <div className="flex flex-col gap-2 bg-slate-900 px-3 py-2 text-white sm:flex-row sm:items-center sm:justify-between">
             <div>
               <span className="font-mono text-xs">#{idx + 1} · page {row?.page ?? '?'} · row {idx + 1}</span>
               {row?.row_image_path && (
@@ -1230,7 +1239,7 @@ export default function ReviewPage() {
                 </p>
               )}
             </div>
-            <div className="flex items-center gap-3">
+            <div className="flex flex-wrap items-center gap-3">
               <span className="text-xs font-medium text-slate-300">
                 Drag image to pan
               </span>
@@ -1264,7 +1273,7 @@ export default function ReviewPage() {
             )}
             {row?.row_image_path && (
               <div
-                className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-2 rounded-md bg-slate-950/90 px-3 py-2 text-white shadow-xl backdrop-blur"
+                className="absolute bottom-3 left-1/2 flex max-w-[calc(100%-24px)] -translate-x-1/2 items-center gap-2 overflow-x-auto rounded-md bg-slate-950/90 px-3 py-2 text-white shadow-xl backdrop-blur"
                 onPointerDown={(event) => event.stopPropagation()}
               >
                 <select
@@ -1326,7 +1335,7 @@ export default function ReviewPage() {
               </div>
             )}
           </div>
-          <div className="flex items-center gap-3 border-t border-slate-300 bg-white px-4 py-3">
+          <div className="flex flex-wrap items-center gap-3 border-t border-slate-300 bg-white px-4 py-3">
             <button className="btn-secondary py-2 px-3" onClick={() => nav(-1)} disabled={idx === 0 || saving}>
               <ChevronLeft size={16} />
             </button>

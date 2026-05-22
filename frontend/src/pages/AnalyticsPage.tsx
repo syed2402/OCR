@@ -84,11 +84,11 @@ export default function AnalyticsPage() {
   }, [operations, search, sortMode])
 
   return (
-    <div className="flex h-screen overflow-hidden">
+    <div className="flex min-h-screen flex-col overflow-hidden md:h-screen md:flex-row">
       {/* ------------------------------------------------------------------ */}
       {/* LEFT SIDEBAR — Operation selector                                    */}
       {/* ------------------------------------------------------------------ */}
-      <aside className="w-64 bg-white border-r border-gray-200 flex flex-col shrink-0">
+      <aside className="flex max-h-[42vh] w-full shrink-0 flex-col border-b border-gray-200 bg-white md:max-h-none md:w-64 md:border-b-0 md:border-r">
         <div className="p-4 border-b border-gray-100 space-y-3">
           <div className="flex items-center justify-between">
             <h3 className="font-semibold text-gray-800 text-sm">Operations</h3>
@@ -157,7 +157,7 @@ export default function AnalyticsPage() {
       {/* ------------------------------------------------------------------ */}
       {/* MAIN CONTENT                                                         */}
       {/* ------------------------------------------------------------------ */}
-      <div className="flex-1 flex flex-col overflow-hidden">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
         {!selectedOp ? (
           <div className="flex-1 flex items-center justify-center text-center p-8">
             <div>
@@ -171,10 +171,10 @@ export default function AnalyticsPage() {
         ) : (
           <>
             {/* Top bar */}
-            <div className="bg-white border-b border-gray-200 px-6 py-4 shrink-0">
+            <div className="shrink-0 border-b border-gray-200 bg-white px-4 py-4 sm:px-6">
               <div className="flex items-center justify-between gap-4 flex-wrap">
                 {/* Rich operation header */}
-                <div>
+                <div className="min-w-0">
                   <div className="flex items-center gap-2 mb-0.5">
                     <span className="text-xs font-semibold text-blue-500 uppercase tracking-wider">
                       Operation
@@ -186,7 +186,7 @@ export default function AnalyticsPage() {
                   <p className="text-sm font-medium text-gray-700">
                     {selectedOp.process_name ?? '—'}
                   </p>
-                  <div className="flex items-center gap-4 mt-1.5">
+                  <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1">
                     <span className="flex items-center gap-1 text-xs text-gray-400">
                       <Database size={11} />
                       {analytics ? analytics.stats.total : selectedOp.approved_count} historical records
@@ -211,7 +211,7 @@ export default function AnalyticsPage() {
                 </div>
 
                 {/* Date range filters */}
-                <div className="flex items-center gap-2 flex-wrap">
+                <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
                   {(['7d', '30d', 'custom'] as DateRange[]).map((r) => (
                     <button
                       key={r}
@@ -227,7 +227,7 @@ export default function AnalyticsPage() {
                   ))}
 
                   {dateRange === 'custom' && (
-                    <div className="flex items-center gap-2">
+                    <div className="grid w-full grid-cols-[1fr_auto_1fr] items-center gap-2 sm:flex sm:w-auto">
                       <input
                         type="date"
                         className="border border-gray-300 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -250,21 +250,23 @@ export default function AnalyticsPage() {
             </div>
 
             {/* Analytics content */}
-            <div className="flex-1 overflow-y-auto p-6 space-y-6">
+            <div className="flex-1 space-y-5 overflow-y-auto p-4 sm:p-6">
               {analytics && (
                 <>
                   {/* OK/NOK summary cards */}
                   <OkNokSummary stats={analytics.stats} />
 
                   {/* Measurements table */}
-                  <div className="card">
-                    <div className="px-5 py-4 border-b border-gray-100">
+                  <div className="card overflow-hidden">
+                    <div className="border-b border-gray-100 px-4 py-4 sm:px-5">
                       <h3 className="font-semibold text-gray-800">Historical Measurements</h3>
                       <p className="text-xs text-gray-400 mt-0.5">
                         {analytics.rows.length} record(s) · approved data only
                       </p>
                     </div>
-                    <MeasurementsTable operationNumber={analytics.operation_number} rows={analytics.rows} />
+                    <div className="overflow-x-auto">
+                      <MeasurementsTable operationNumber={analytics.operation_number} rows={analytics.rows} />
+                    </div>
                   </div>
 
                   {/* Trend chart */}
