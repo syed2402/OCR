@@ -120,7 +120,8 @@ def get_analytics(
         except ValueError:
             raise HTTPException(status_code=400, detail="end_date must be YYYY-MM-DD")
 
-    rows = query.order_by(ExtractedOperation.audit_date.asc()).all()
+    rows = query.order_by(ExtractedOperation.audit_date.asc(), ExtractedOperation.id.asc()).all()
+    rows = _dedupe_operation_rows(rows)
 
     if not rows:
         # Return empty analytics structure — not an error
@@ -183,3 +184,32 @@ def get_analytics(
             "avg_torque": avg_torque,
         },
     }
+
+
+def _dedupe_operation_rows(rows: list[ExtractedOperation]) -> list[ExtractedOperation]:
+    """
+    Keep one approved row per operation/date/upload.
+
+    OCR can occasionally duplicate an operation number on nearby rows from the
+    same uploaded sheet. For analytics, the row with the fullest measurement
+    vector is the canonical row for that operation/date.
+    """
+    best_by_group: dict[tuple[str | None, date | None, str | None], ExtractedOperation] = {}
+
+    for row in rows:
+        key = (
+            row.operation_number,
+            row.audit_date,
+            str(row.upload_id) if row.upload_id else None,
+        )
+        current = best_by_group.get(key)
+        if current is None:
+            best_by_group[key] = row
+            continue
+
+        current_count = len(current.measurements_json or [])
+        next_count = len(row.measurements_json or [])
+        if next_count > current_count:
+            best_by_group[key] = row
+
+    return sorted(best_by_group.values(), key=lambda row: (row.audit_date or date.min, row.id))

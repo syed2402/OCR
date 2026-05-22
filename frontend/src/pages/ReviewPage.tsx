@@ -670,6 +670,63 @@ export default function ReviewPage() {
   const columnDefs = useMemo<ColDef<SheetRow>[]>(() => {
     const editable = ({ data }: { data?: SheetRow }) => data?.review_status !== 'APPROVED'
     const zoomWidth = (width: number) => Math.round(width * sheetZoom / 100)
+    const displayedRows = (api: GridApi<SheetRow>) => {
+      const visibleRows: SheetRow[] = []
+      api.forEachNodeAfterFilterAndSort((node) => {
+        if (node.data) visibleRows.push(node.data)
+      })
+      return visibleRows
+    }
+    const findDisplayedRowIndex = (params: { api: GridApi<SheetRow>; data?: SheetRow }) => {
+      const visibleRows = displayedRows(params.api)
+      const index = visibleRows.findIndex(
+        (row) => row.id === params.data?.id && row.measurement_offset === params.data?.measurement_offset,
+      )
+      return { index, visibleRows }
+    }
+    const rowSpanForOperationGroup = (params: { api: GridApi<SheetRow>; data?: SheetRow }) => {
+      if (!params.data?.operation_number) return 1
+
+      const { index, visibleRows } = findDisplayedRowIndex(params)
+      if (index === -1) return 1
+
+      const currentOp = params.data.operation_number
+      if (visibleRows[index - 1]?.operation_number === currentOp) return 1
+
+      let span = 1
+      for (let i = index + 1; i < visibleRows.length; i++) {
+        if (visibleRows[i].operation_number !== currentOp) break
+        span++
+      }
+      return span
+    }
+    const isOperationGroupContinuation = (params: { api: GridApi<SheetRow>; data?: SheetRow }) => {
+      if (!params.data?.operation_number) return false
+      const { index, visibleRows } = findDisplayedRowIndex(params)
+      return index > 0 && visibleRows[index - 1]?.operation_number === params.data.operation_number
+    }
+    const mergedCellStyle = (params: { api: GridApi<SheetRow>; data?: SheetRow }) => {
+      const span = rowSpanForOperationGroup(params)
+      if (isOperationGroupContinuation(params)) {
+        return {
+          alignItems: 'center',
+          backgroundColor: '#fff',
+          display: 'flex',
+          fontWeight: 600,
+          justifyContent: 'center',
+          zIndex: 1,
+        }
+      }
+
+      return {
+        alignItems: 'center',
+        backgroundColor: '#fff',
+        display: 'flex',
+        fontWeight: span > 1 ? 'bold' : 600,
+        justifyContent: 'center',
+        zIndex: span > 1 ? 2 : 1,
+      }
+    }
     const confidenceCellClass = (
       baseClass: string,
       valueGetter: (row?: SheetRow) => number | null | undefined,
@@ -700,7 +757,7 @@ export default function ReviewPage() {
       </div>
     )
     const measurementCols: ColDef<SheetRow>[] = Array.from({ length: measurementColumnCount }, (_, i) => ({
-      headerName: `M${i + 1}`,
+      headerName: `${i + 1}`,  // Just the number (1, 2, 3, 4, 5, 6)
       field: `m${i}` as keyof SheetRow & string,
       width: zoomWidth(86),
       editable,
@@ -723,10 +780,12 @@ export default function ReviewPage() {
         width: zoomWidth(140),
         editable: (params) => editable(params) && !params.data?.is_continuation,
         cellClass: confidenceCellClass('font-mono font-semibold', (row) => row?.confidence_scores?.operation_number),
-        cellRenderer: ({ data, value }: { data?: SheetRow; value?: string | null }) =>
-          data?.is_continuation
-            ? <span className="text-slate-300">↳</span>
-            : withConfidence(value || '-', data?.confidence_scores?.operation_number),
+        cellRenderer: (params: { api: GridApi<SheetRow>; data?: SheetRow; value?: string | null }) =>
+          isOperationGroupContinuation(params)
+            ? null
+            : withConfidence(params.value || '-', params.data?.confidence_scores?.operation_number),
+        rowSpan: rowSpanForOperationGroup,
+        cellStyle: mergedCellStyle,
       },
       {
         headerName: 'Engine No',
@@ -734,10 +793,12 @@ export default function ReviewPage() {
         width: zoomWidth(150),
         editable: false,
         cellClass: confidenceCellClass('font-mono font-semibold', (row) => row?.confidence_scores?.engine_number),
-        cellRenderer: ({ data, value }: { data?: SheetRow; value?: string | null }) =>
-          data?.is_continuation
+        cellRenderer: (params: { api: GridApi<SheetRow>; data?: SheetRow; value?: string | null }) =>
+          isOperationGroupContinuation(params)
             ? null
-            : withConfidence(value || '-', data?.confidence_scores?.engine_number),
+            : withConfidence(params.value || '-', params.data?.confidence_scores?.engine_number),
+        rowSpan: rowSpanForOperationGroup,
+        cellStyle: mergedCellStyle,
       },
       ...measurementCols,
       {
@@ -1053,6 +1114,7 @@ export default function ReviewPage() {
               animateRows
               suppressDragLeaveHidesColumns
               stopEditingWhenCellsLoseFocus
+              suppressRowTransform={false}
             />
           </div>
         </div>
