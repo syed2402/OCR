@@ -3,7 +3,7 @@
  * All requests go through the Vite proxy (/api → http://localhost:8000).
  */
 
-const BASE = import.meta.env.VITE_API_BASE ?? '/api'
+const BASE = (import.meta.env.VITE_API_BASE ?? '/api').replace(/\/$/, '')
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
@@ -213,7 +213,7 @@ export function getAnalytics(
 export function rowImageUrl(imagePath: string): string {
   // imagePath is an absolute server-side path; serve via /static
   const filename = imagePath.split(/[/\\]/).pop() ?? ''
-  return `/static/row_images/${filename}`
+  return `${BASE}/static/row_images/${filename}`
 }
 
 export function isRowCrop(imagePath: string): boolean {
