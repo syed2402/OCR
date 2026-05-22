@@ -1,0 +1,1658 @@
+/**
+ * Screen 2 — OCR Review
+ *
+ * Split layout: audit page image (left) | editable extracted fields (right).
+ * Every row must be APPROVED before it enters the analytics engine.
+ *
+ * Keyboard shortcuts:
+ *   →  / N   next row
+ *   ←  / P   previous row
+ *   A        approve current row
+ *   R        reject current row
+ */
+
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode, type WheelEvent as ReactWheelEvent } from 'react'
+import { useNavigate, useParams } from 'react-router-dom'
+import toast from 'react-hot-toast'
+import { AgGridReact } from 'ag-grid-react'
+import { format, parseISO } from 'date-fns'
+import {
+  CellValueChangedEvent,
+  ColDef,
+  GridApi,
+  RowClickedEvent,
+  RowClassParams,
+} from 'ag-grid-community'
+import 'ag-grid-community/styles/ag-grid.css'
+import 'ag-grid-community/styles/ag-theme-quartz.css'
+import {
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
+  Check,
+  CheckCheck,
+  X,
+  Plus,
+  Minus,
+  RotateCcw,
+  RotateCw,
+  RefreshCw,
+  BarChart2,
+  Download,
+  Columns3,
+  Loader2,
+} from 'lucide-react'
+import {
+  approveRow,
+  approveAll,
+  getUploadRows,
+  listUploads,
+  rejectRow,
+  reviewRow,
+  rowImageUrl,
+  isRowCrop,
+  uploadFileUrl,
+  ExtractedRow,
+  UploadSummary,
+} from '../api/client'
+
+// ---------------------------------------------------------------------------
+// Row status badge
+// ---------------------------------------------------------------------------
+function StatusBadge({ status }: { status: string }) {
+  const cls: Record<string, string> = {
+    EXTRACTED: 'status-extracted',
+    REVIEWED: 'status-reviewed',
+    APPROVED: 'status-approved',
+    REJECTED: 'status-rejected',
+  }
+  return <span className={cls[status] ?? 'status-extracted'}>{status}</span>
+}
+
+// ---------------------------------------------------------------------------
+// Confidence flag helper — highlight suspicious fields
+// ---------------------------------------------------------------------------
+function isSuspicious(row: ExtractedRow): Record<string, boolean> {
+  const repeatedMeasurements =
+    row.measurements.length >= 4 && new Set(row.measurements.map(String)).size <= 2
+  return {
+    operation_number: !row.operation_number,
+    process_name: !row.process_name,
+    audit_date: !row.audit_date,
+    judgement: !row.judgement || !['OK', 'NOK'].includes(row.judgement.toUpperCase()),
+    measurements:
+      row.measurements.length === 0 ||
+      row.measurements.some((m) => isNaN(m)) ||
+      repeatedMeasurements,
+  }
+}
+
+type SheetRow = ExtractedRow & {
+  row_number: number
+  measurement_count: number
+  measurement_offset: number
+  is_continuation: boolean
+  [key: `m${number}`]: number | null
+}
+
+const DEFAULT_TORQUE_VALUE_COLUMNS = 6
+const IMAGE_ZOOM_LEVELS = [50, 75, 100, 125, 150, 175, 200, 250, 300]
+
+function clampImageZoom(value: number) {
+  return Math.max(40, Math.min(400, value))
+}
+
+function normalizeConfidence(value?: number | null) {
+  if (value === null || value === undefined) return null
+  const normalized = value > 1 ? value / 100 : value
+  return Math.max(0, Math.min(1, normalized))
+}
+
+function confidenceLabel(value?: number | null) {
+  const normalized = normalizeConfidence(value)
+  return normalized === null ? '-' : normalized.toFixed(2)
+}
+
+function confidenceDot(value?: number | null) {
+  const normalized = normalizeConfidence(value)
+  if (normalized === null) return ''
+  if (normalized >= 0.85) return 'bg-slate-950'
+  if (normalized >= 0.7) return 'bg-blue-600'
+  return 'bg-red-600'
+}
+
+function confidenceTextClass(value?: number | null) {
+  const normalized = normalizeConfidence(value)
+  if (normalized === null) return 'text-slate-400'
+  if (normalized >= 0.85) return 'text-slate-950'
+  if (normalized >= 0.7) return 'text-blue-700'
+  return 'text-red-700'
+}
+
+function confidenceValueClass(value?: number | null) {
+  const normalized = normalizeConfidence(value)
+  if (normalized === null) return ''
+  if (normalized >= 0.85) return 'text-slate-950'
+  if (normalized >= 0.7) return 'text-blue-700'
+  return 'text-red-700'
+}
+
+// ---------------------------------------------------------------------------
+// Upload selector bar (shown when no uploadId in URL)
+// ---------------------------------------------------------------------------
+function UploadSelector({ onSelect }: { onSelect: (id: string) => void }) {
+  const [uploads, setUploads] = useState<UploadSummary[]>([])
+  const [loading, setLoading] = useState(true)
+  const navigate = useNavigate()
+
+  useEffect(() => {
+    listUploads()
+      .then((u) => setUploads(u.filter((x) => x.status === 'COMPLETED')))
+      .catch(() => {})
+      .finally(() => setLoading(false))
+  }, [])
+
+  if (loading) return <div className="p-8 text-gray-500 text-sm">Loading uploads…</div>
+
+  if (uploads.length === 0)
+    return (
+      <div className="p-8 text-center">
+        <p className="text-gray-500 mb-4">No completed uploads yet.</p>
+        <button className="btn-primary" onClick={() => navigate('/')}>
+          Upload a PDF
+        </button>
+      </div>
+    )
+
+  const formatUploadTime = (value: string | null) => {
+    if (!value) return '-'
+    try {
+      return format(parseISO(value), 'dd MMM yyyy, hh:mm a')
+    } catch {
+      return value
+    }
+  }
+
+  const sessionIdForUpload = (value: string | null) => {
+    if (!value) return 'Analytics_TorqueAudit_unknown'
+    try {
+      return `Analytics_TorqueAudit_${format(parseISO(value), 'yyyyMMdd_HHmmss')}`
+    } catch {
+      return `Analytics_TorqueAudit_${value.replace(/[^0-9A-Za-z]/g, '')}`
+    }
+  }
+
+  return (
+    <div className="p-8 max-w-5xl mx-auto">
+      <h2 className="text-xl font-bold mb-4">Select Upload to Review</h2>
+      <div className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+        <table className="w-full border-collapse text-sm">
+          <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
+            <tr>
+              <th className="w-20 border-r border-slate-200 px-4 py-3 text-left font-semibold">Sl No</th>
+              <th className="border-r border-slate-200 px-4 py-3 text-left font-semibold">Session ID</th>
+              <th className="border-r border-slate-200 px-4 py-3 text-left font-semibold">Opt Number</th>
+              <th className="w-56 border-r border-slate-200 px-4 py-3 text-left font-semibold">Time</th>
+              <th className="w-40 border-r border-slate-200 px-4 py-3 text-left font-semibold">Extracted Rows</th>
+              <th className="w-28 border-r border-slate-200 px-4 py-3 text-left font-semibold">File</th>
+              <th className="w-32 px-4 py-3 text-left font-semibold">Review</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-200">
+            {uploads.map((u, index) => (
+              <tr key={u.upload_id} className="hover:bg-slate-50">
+                <td className="border-r border-slate-200 px-4 py-3 font-mono text-slate-600">
+                  {index + 1}
+                </td>
+                <td className="border-r border-slate-200 px-4 py-3 font-medium text-slate-900">
+                  <span className="font-mono text-xs text-slate-700">
+                    {sessionIdForUpload(u.created_at)}
+                  </span>
+                </td>
+                <td className="border-r border-slate-200 px-4 py-3 font-medium text-slate-900">
+                  {u.original_filename}
+                </td>
+                <td className="border-r border-slate-200 px-4 py-3 text-slate-600">
+                  {formatUploadTime(u.created_at)}
+                </td>
+                <td className="border-r border-slate-200 px-4 py-3 font-mono text-slate-700">
+                  {u.total_rows}
+                </td>
+                <td className="border-r border-slate-200 px-4 py-3">
+                  <a
+                    className="text-sm font-medium text-blue-600 hover:text-blue-800"
+                    href={uploadFileUrl(u.upload_id)}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Open
+                  </a>
+                </td>
+                <td className="px-4 py-3">
+                  <button
+                    className="btn-primary py-1.5 px-3 text-xs"
+                    onClick={() => onSelect(u.upload_id)}
+                    type="button"
+                  >
+                    Review
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Main Review UI
+// ---------------------------------------------------------------------------
+export default function ReviewPage() {
+  const { uploadId: urlUploadId } = useParams<{ uploadId: string }>()
+  const navigate = useNavigate()
+  const gridApiRef = useRef<GridApi<SheetRow> | null>(null)
+  const reviewLayoutRef = useRef<HTMLDivElement | null>(null)
+  const imagePaneRef = useRef<HTMLDivElement | null>(null)
+  const imageDragRef = useRef<{
+    pointerId: number
+    startX: number
+    startY: number
+    originX: number
+    originY: number
+  } | null>(null)
+
+  const [uploadId, setUploadId] = useState<string | null>(urlUploadId ?? null)
+  const [rows, setRows] = useState<ExtractedRow[]>([])
+  const [idx, setIdx] = useState(0)
+  const [loading, setLoading] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [approvingAll, setApprovingAll] = useState(false)
+  const [activeSheet, setActiveSheet] = useState<number | 'ALL'>('ALL')
+  const [expandedPage, setExpandedPage] = useState<number | null>(null)
+  const [rowHeight, setRowHeight] = useState(34)
+  const [sheetPanelPercent, setSheetPanelPercent] = useState(62)
+  const [sheetZoom, setSheetZoom] = useState(100)
+  const [imageZoom, setImageZoom] = useState(100)
+  const [imageRotation, setImageRotation] = useState(0)
+  const [imagePan, setImagePan] = useState({ x: 0, y: 0 })
+  const [isImagePanning, setIsImagePanning] = useState(false)
+  const [showConfidence, setShowConfidence] = useState(false)
+  const [measurementColumnCount, setMeasurementColumnCount] = useState(0)
+
+  // Local editable state for the current row
+  const [editOpNum, setEditOpNum] = useState('')
+  const [editProcName, setEditProcName] = useState('')
+  const [editDate, setEditDate] = useState('')
+  const [editJudgement, setEditJudgement] = useState('')
+  const [editMeasurements, setEditMeasurements] = useState<string[]>([])
+
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      window.dispatchEvent(new Event('resize'))
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [sheetPanelPercent])
+
+  // Load rows when uploadId is known — suspicious rows bubble to top
+  useEffect(() => {
+    if (!uploadId) return
+    setLoading(true)
+    getUploadRows(uploadId)
+      .then((data) => {
+        // Keep backend page order — rows already sorted by page then id
+        setRows(data)
+        setIdx(0)
+        setActiveSheet('ALL')
+        setExpandedPage(null)
+        setMeasurementColumnCount(DEFAULT_TORQUE_VALUE_COLUMNS)
+      })
+      .catch((e) => toast.error(`Failed to load rows: ${e.message}`))
+      .finally(() => setLoading(false))
+  }, [uploadId])
+
+  const row = rows[idx] ?? null
+
+  // Populate edit fields whenever the current row changes
+  useEffect(() => {
+    if (!row) return
+    setEditOpNum(row.operation_number ?? '')
+    setEditProcName(row.process_name ?? '')
+    setEditDate(row.audit_date ?? '')
+    setEditJudgement(row.judgement ?? '')
+    setEditMeasurements(row.measurements.map(String))
+  }, [row?.id])
+
+  useEffect(() => {
+    imagePaneRef.current?.scrollTo({ top: 0, left: 0, behavior: 'smooth' })
+    setImageZoom(100)
+    setImageRotation(0)
+    setImagePan({ x: 0, y: 0 })
+    imageDragRef.current = null
+    setIsImagePanning(false)
+  }, [row?.id])
+
+  const resetImageView = useCallback(() => {
+    setImageZoom(100)
+    setImageRotation(0)
+    setImagePan({ x: 0, y: 0 })
+    imagePaneRef.current?.scrollTo({ top: 0, left: 0, behavior: 'smooth' })
+  }, [])
+
+  const updateImageZoom = useCallback((nextZoom: number) => {
+    setImageZoom(clampImageZoom(nextZoom))
+  }, [])
+
+  const handleImagePointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!row?.row_image_path || event.button !== 0) return
+    event.currentTarget.setPointerCapture(event.pointerId)
+    imageDragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: imagePan.x,
+      originY: imagePan.y,
+    }
+    setIsImagePanning(true)
+  }, [imagePan.x, imagePan.y, row?.row_image_path])
+
+  const handleImagePointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = imageDragRef.current
+    if (!drag || drag.pointerId !== event.pointerId) return
+    setImagePan({
+      x: drag.originX + event.clientX - drag.startX,
+      y: drag.originY + event.clientY - drag.startY,
+    })
+  }, [])
+
+  const stopImagePan = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (imageDragRef.current?.pointerId === event.pointerId) {
+      imageDragRef.current = null
+      setIsImagePanning(false)
+    }
+  }, [])
+
+  const handleImageWheel = useCallback((event: ReactWheelEvent<HTMLDivElement>) => {
+    if (!row?.row_image_path) return
+    if (!event.ctrlKey && !event.metaKey) return
+    event.preventDefault()
+    updateImageZoom(imageZoom + (event.deltaY < 0 ? 10 : -10))
+  }, [imageZoom, row?.row_image_path, updateImageZoom])
+
+  const flags = useMemo(() => (row ? isSuspicious(row) : {}), [row])
+
+  const nav = useCallback(
+    (delta: number) => {
+      const next = idx + delta
+      if (next >= 0 && next < rows.length) setIdx(next)
+    },
+    [idx, rows.length],
+  )
+
+  // Keyboard shortcuts — deps include handleApprove/handleReject to avoid stale closures
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return
+      if (e.key === 'ArrowRight' || e.key === 'n') nav(1)
+      if (e.key === 'ArrowLeft' || e.key === 'p') nav(-1)
+      if (e.key === 'a' && row) handleApprove()
+      if (e.key === 'r' && row) handleReject()
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nav, row, saving])
+
+  // Build payload from editable fields
+  const buildPayload = () => ({
+    operation_number: editOpNum || undefined,
+    process_name: editProcName || undefined,
+    audit_date: editDate || undefined,
+    judgement: editJudgement || undefined,
+    measurements: editMeasurements.map(Number).filter((n) => !isNaN(n)),
+  })
+
+  const buildPayloadFromRow = (source: ExtractedRow) => ({
+    operation_number: source.operation_number || undefined,
+    process_name: source.process_name || undefined,
+    audit_date: source.audit_date || undefined,
+    judgement: source.judgement || undefined,
+    measurements: source.measurements,
+  })
+
+  const handleApprove = async () => {
+    if (!row) return
+    await handleApproveById(row.id, true)
+      toast.success('Row approved ✓')
+  }
+
+  const handleApproveById = async (rowId: number, advance = false) => {
+    const target = rows.find((r) => r.id === rowId)
+    if (!target) return
+    setSaving(true)
+    try {
+      if (target.id === row?.id) {
+        await reviewRow(target.id, buildPayload())
+      } else {
+        await reviewRow(target.id, buildPayloadFromRow(target))
+      }
+      const approved = await approveRow(target.id)
+      setRows((prev) => prev.map((r) => (r.id === approved.id ? approved : r)))
+      toast.success('Row approved')
+      if (advance && idx < rows.length - 1) nav(1)
+    } catch (e: any) {
+      toast.error(e.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleApproveAll = async () => {
+    if (!uploadId) return
+    toast(
+      (t) => (
+        <div className="flex flex-col gap-2">
+          <p className="font-medium text-gray-800">Approve all {pendingCount} pending rows?</p>
+          <p className="text-sm text-gray-500">They will go straight to analytics.</p>
+          <div className="flex gap-2 mt-1">
+            <button
+              className="btn-success text-xs py-1 px-3"
+              onClick={() => { toast.dismiss(t.id); _doApproveAll() }}
+            >
+              Approve All
+            </button>
+            <button
+              className="btn-secondary text-xs py-1 px-3"
+              onClick={() => toast.dismiss(t.id)}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ),
+      { duration: 10000 },
+    )
+  }
+
+  const _doApproveAll = async () => {
+    if (!uploadId) return
+    setApprovingAll(true)
+    try {
+      const { approved } = await approveAll(uploadId)
+      setRows((prev) => prev.map((r) =>
+        r.review_status === 'EXTRACTED' || r.review_status === 'REVIEWED'
+          ? { ...r, review_status: 'APPROVED' }
+          : r
+      ))
+      toast.success(`${approved} rows approved — visible in Analytics now`)
+    } catch (e: any) {
+      toast.error(e.message)
+    } finally {
+      setApprovingAll(false)
+    }
+  }
+
+  const handleReject = async () => {
+    if (!row) return
+    setSaving(true)
+    try {
+      const rejected = await rejectRow(row.id)
+      setRows((prev) => prev.map((r) => (r.id === rejected.id ? rejected : r)))
+      toast('Row rejected', { icon: '🗑' })
+      if (idx < rows.length - 1) nav(1)
+    } catch (e: any) {
+      toast.error(e.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleRejectById = async (rowId: number) => {
+    setSaving(true)
+    try {
+      const rejected = await rejectRow(rowId)
+      setRows((prev) => prev.map((r) => (r.id === rejected.id ? rejected : r)))
+      toast('Row rejected')
+    } catch (e: any) {
+      toast.error(e.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const addMeasurement = () => setEditMeasurements((m) => [...m, ''])
+  const removeMeasurement = (i: number) =>
+    setEditMeasurements((m) => m.filter((_, j) => j !== i))
+  const updateMeasurement = (i: number, val: string) =>
+    setEditMeasurements((m) => m.map((v, j) => (j === i ? val : v)))
+
+  // Page-jump helpers
+  const pages = useMemo(() => {
+    const seen = new Set<number>()
+    const list: number[] = []
+    rows.forEach((r) => {
+      const p = r.page ?? 1
+      if (!seen.has(p)) { seen.add(p); list.push(p) }
+    })
+    return list.sort((a, b) => a - b)
+  }, [rows])
+
+  const currentPage = rows[idx]?.page ?? 1
+
+  const jumpToPage = useCallback(
+    (targetPage: number) => {
+      const i = rows.findIndex((r) => (r.page ?? 1) === targetPage)
+      if (i >= 0) setIdx(i)
+    },
+    [rows],
+  )
+
+  const jumpPageDelta = useCallback(
+    (delta: number) => {
+      const ci = pages.indexOf(currentPage)
+      const next = pages[ci + delta]
+      if (next !== undefined) jumpToPage(next)
+    },
+    [pages, currentPage, jumpToPage],
+  )
+
+  const sheetRows = useMemo<SheetRow[]>(() => {
+    const visible = activeSheet === 'ALL'
+      ? rows
+      : rows.filter((r) => (r.page ?? 1) === activeSheet)
+
+    return visible.flatMap((r) => {
+      const chunks = Math.max(1, Math.ceil(r.measurements.length / DEFAULT_TORQUE_VALUE_COLUMNS))
+      return Array.from({ length: chunks }, (_, chunkIndex) => {
+        const measurementOffset = chunkIndex * DEFAULT_TORQUE_VALUE_COLUMNS
+        const flat: SheetRow = {
+          ...r,
+          row_number: rows.findIndex((x) => x.id === r.id) + 1,
+          measurement_count: r.measurements.length,
+          measurement_offset: measurementOffset,
+          is_continuation: chunkIndex > 0,
+        }
+        for (let i = 0; i < measurementColumnCount; i++) {
+          flat[`m${i}`] = r.measurements[measurementOffset + i] ?? null
+        }
+        return flat
+      })
+    })
+  }, [activeSheet, measurementColumnCount, rows])
+
+  const selectRowById = useCallback((rowId: number) => {
+    const nextIdx = rows.findIndex((r) => r.id === rowId)
+    if (nextIdx >= 0) setIdx(nextIdx)
+  }, [rows])
+
+  const startPanelResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const layout = reviewLayoutRef.current
+    if (!layout) return
+
+    event.preventDefault()
+
+    const updatePanelSplit = (clientX: number) => {
+      const rect = layout.getBoundingClientRect()
+      const nextPercent = ((clientX - rect.left) / rect.width) * 100
+      setSheetPanelPercent(Math.min(82, Math.max(24, nextPercent)))
+    }
+
+    updatePanelSplit(event.clientX)
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+
+    const handlePointerMove = (moveEvent: globalThis.PointerEvent) => {
+      updatePanelSplit(moveEvent.clientX)
+    }
+
+    const stopResize = () => {
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+      window.removeEventListener('pointermove', handlePointerMove)
+      window.removeEventListener('pointerup', stopResize)
+      window.removeEventListener('pointercancel', stopResize)
+    }
+
+    window.addEventListener('pointermove', handlePointerMove)
+    window.addEventListener('pointerup', stopResize)
+    window.addEventListener('pointercancel', stopResize)
+  }, [])
+
+  const saveGridEdit = useCallback(async (event: CellValueChangedEvent<SheetRow>) => {
+    const edited = event.data
+    if (!edited || edited.review_status === 'APPROVED') return
+
+    const field = String(event.colDef.field ?? '')
+    const base = rows.find((r) => r.id === edited.id)
+    if (!base) return
+
+    const next: ExtractedRow = { ...base }
+    if (field === 'operation_number') next.operation_number = edited.operation_number ?? null
+    if (field === 'process_name') next.process_name = edited.process_name ?? null
+    if (field === 'audit_date') next.audit_date = edited.audit_date ?? null
+    if (field === 'judgement') next.judgement = edited.judgement ?? null
+    if (/^m\d+$/.test(field)) {
+      const measurementIndex = (edited.measurement_offset ?? 0) + Number(field.slice(1))
+      const measurements = [...base.measurements]
+      const value = event.newValue === '' || event.newValue === null ? null : Number(event.newValue)
+      if (value === null || Number.isNaN(value)) {
+        measurements.splice(measurementIndex, 1)
+      } else {
+        measurements[measurementIndex] = value
+      }
+      next.measurements = measurements.filter((value) => value !== undefined)
+    }
+
+    setRows((prev) => prev.map((r) => (r.id === next.id ? { ...next, review_status: 'REVIEWED' } : r)))
+    selectRowById(next.id)
+
+    try {
+      const reviewed = await reviewRow(next.id, buildPayloadFromRow(next))
+      setRows((prev) => prev.map((r) => (r.id === reviewed.id ? reviewed : r)))
+      toast.success('Cell saved')
+    } catch (e: any) {
+      setRows((prev) => prev.map((r) => (r.id === base.id ? base : r)))
+      toast.error(e.message)
+    }
+  }, [rows, selectRowById])
+
+  const columnDefs = useMemo<ColDef<SheetRow>[]>(() => {
+    const editable = ({ data }: { data?: SheetRow }) => data?.review_status !== 'APPROVED'
+    const zoomWidth = (width: number) => Math.round(width * sheetZoom / 100)
+    const confidenceCellClass = (
+      baseClass: string,
+      valueGetter: (row?: SheetRow) => number | null | undefined,
+    ) => ({ data }: { data?: SheetRow }) => {
+      const value = normalizeConfidence(valueGetter(data))
+      const classes = [baseClass]
+      if (showConfidence && value !== null && value !== undefined) {
+        if (value < 0.7) classes.push('review-confidence-low')
+        else if (value < 0.85) classes.push('review-confidence-medium')
+      }
+      return classes.join(' ')
+    }
+    const withConfidence = (
+      content: ReactNode,
+      value?: number | null,
+      align: 'left' | 'right' = 'left',
+    ) => (
+      <div className="relative flex h-full items-center pb-3">
+        <div className={`${align === 'right' ? 'w-full text-right' : 'w-full'} ${showConfidence ? confidenceValueClass(value) : ''}`}>
+          {content}
+        </div>
+        {showConfidence && value !== null && value !== undefined && (
+          <span className={`pointer-events-none absolute bottom-0 left-0 flex items-center gap-1 text-[10px] font-semibold leading-none ${confidenceTextClass(value)}`}>
+            <span className={`h-1.5 w-1.5 rounded-full ${confidenceDot(value)}`} />
+            {confidenceLabel(value)}
+          </span>
+        )}
+      </div>
+    )
+    const measurementCols: ColDef<SheetRow>[] = Array.from({ length: measurementColumnCount }, (_, i) => ({
+      headerName: `M${i + 1}`,
+      field: `m${i}` as keyof SheetRow & string,
+      width: zoomWidth(86),
+      editable,
+      type: 'numericColumn',
+      cellEditor: 'agNumberCellEditor',
+      cellClass: confidenceCellClass('font-mono text-right', (row) => row?.confidence_scores?.measurements?.[i]),
+      cellRenderer: ({ data, value }: { data?: SheetRow; value?: number | null }) =>
+        withConfidence(value ?? '-', data?.confidence_scores?.measurements?.[i], 'right'),
+      valueParser: ({ newValue }) => {
+        if (newValue === '' || newValue === null || newValue === undefined) return null
+        const value = Number(newValue)
+        return Number.isNaN(value) ? null : value
+      },
+    }))
+
+    return [
+      {
+        headerName: 'Opn Code',
+        field: 'operation_number',
+        width: zoomWidth(140),
+        editable: (params) => editable(params) && !params.data?.is_continuation,
+        cellClass: confidenceCellClass('font-mono font-semibold', (row) => row?.confidence_scores?.operation_number),
+        cellRenderer: ({ data, value }: { data?: SheetRow; value?: string | null }) =>
+          data?.is_continuation
+            ? <span className="text-slate-300">↳</span>
+            : withConfidence(value || '-', data?.confidence_scores?.operation_number),
+      },
+      {
+        headerName: 'Engine No',
+        field: 'engine_number',
+        width: zoomWidth(150),
+        editable: false,
+        cellClass: confidenceCellClass('font-mono font-semibold', (row) => row?.confidence_scores?.engine_number),
+        cellRenderer: ({ data, value }: { data?: SheetRow; value?: string | null }) =>
+          data?.is_continuation
+            ? null
+            : withConfidence(value || '-', data?.confidence_scores?.engine_number),
+      },
+      ...measurementCols,
+      {
+        headerName: 'OK/NA/NOK',
+        field: 'judgement',
+        width: zoomWidth(120),
+        editable: (params) => editable(params) && !params.data?.is_continuation,
+        cellEditor: 'agSelectCellEditor',
+        cellEditorParams: { values: ['', 'OK', 'NA', 'NOK'] },
+        cellClass: confidenceCellClass('font-mono font-semibold text-center', (row) => row?.confidence_scores?.judgement),
+        cellRenderer: ({ data, value }: { data?: SheetRow; value?: string | null }) =>
+          data?.is_continuation
+            ? null
+            : withConfidence(value || '-', data?.confidence_scores?.judgement, 'right'),
+      },
+      {
+        headerName: 'Actions',
+        field: 'id',
+        width: zoomWidth(88),
+        editable: false,
+        sortable: false,
+        filter: false,
+        cellRenderer: ({ data }: { data?: SheetRow }) => {
+          if (!data) return null
+          if (data.is_continuation) return <span className="text-xs text-slate-400">More values</span>
+          if (data.review_status === 'APPROVED') return <span className="text-green-700 font-medium">Approved</span>
+          if (data.review_status === 'REJECTED') return <span className="text-red-700 font-medium">Rejected</span>
+          return (
+            <div className="flex h-full items-center justify-center">
+              <button
+                className="flex h-8 w-8 items-center justify-center rounded border border-green-200 text-green-700 hover:bg-green-50"
+                onClick={(e) => { e.stopPropagation(); handleApproveById(data.id) }}
+                title="Confirm row"
+                type="button"
+              >
+                <Check size={16} />
+              </button>
+            </div>
+          )
+        },
+      },
+    ]
+  }, [handleApproveById, measurementColumnCount, sheetZoom, showConfidence])
+
+  const getGridRowClass = useCallback((params: RowClassParams<SheetRow>) => {
+    const data = params.data
+    if (!data) return ''
+    const classes = []
+    if (data.id === row?.id) classes.push('review-grid-selected')
+    if (data.review_status === 'APPROVED') classes.push('review-grid-approved')
+    if (data.review_status === 'REJECTED') classes.push('review-grid-rejected')
+    if (isSuspicious(data).measurements || isSuspicious(data).judgement) classes.push('review-grid-warning')
+    return classes.join(' ')
+  }, [row?.id])
+
+  // Progress stats
+  const approvedCount = rows.filter((r) => r.review_status === 'APPROVED').length
+  const rejectedCount = rows.filter((r) => r.review_status === 'REJECTED').length
+  const pendingCount = rows.filter(
+    (r) => r.review_status === 'EXTRACTED' || r.review_status === 'REVIEWED',
+  ).length
+  const imageTransform = `translate(${imagePan.x}px, ${imagePan.y}px) rotate(${imageRotation}deg) scale(${imageZoom / 100})`
+
+  if (!uploadId) {
+    return <UploadSelector onSelect={setUploadId} />
+  }
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-full p-20">
+        <Loader2 className="animate-spin text-blue-500" size={32} />
+      </div>
+    )
+  }
+
+  if (rows.length === 0) {
+    return (
+      <div className="p-8 text-center">
+        <p className="text-gray-500">No rows found for this upload.</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex flex-col h-screen">
+      {/* Top bar */}
+      <div className="bg-white border-b border-gray-200 px-6 py-3 flex items-center justify-between shrink-0">
+        <div className="flex items-center gap-4">
+          <h2 className="font-semibold text-gray-800">OCR Review</h2>
+        </div>
+        <div className="flex items-center gap-3">
+          {/* Page navigation */}
+          {pages.length > 1 && (
+            <div className="flex items-center gap-1 bg-gray-100 rounded-lg px-2 py-1">
+              <button
+                className="p-1 rounded hover:bg-gray-200 disabled:opacity-30"
+                onClick={() => jumpPageDelta(-1)}
+                disabled={pages.indexOf(currentPage) === 0}
+                title="Previous page"
+              >
+                <ChevronsLeft size={14} />
+              </button>
+              <span className="text-sm font-medium text-gray-700 px-1">
+                Page {pages.indexOf(currentPage) + 1} / {pages.length}
+              </span>
+              <button
+                className="p-1 rounded hover:bg-gray-200 disabled:opacity-30"
+                onClick={() => jumpPageDelta(1)}
+                disabled={pages.indexOf(currentPage) === pages.length - 1}
+                title="Next page"
+              >
+                <ChevronsRight size={14} />
+              </button>
+            </div>
+          )}
+          <span className="text-sm text-gray-500">
+            Row {idx + 1} of {rows.length}
+          </span>
+          {pendingCount > 0 && (
+            <button
+              className="btn-success py-1 px-3 flex items-center gap-1"
+              onClick={handleApproveAll}
+              disabled={approvingAll}
+              title="Approve all pending rows at once"
+            >
+              {approvingAll
+                ? <Loader2 size={14} className="animate-spin" />
+                : <CheckCheck size={14} />}
+              Approve All ({pendingCount})
+            </button>
+          )}
+          <button
+            className="btn-secondary py-1 px-3"
+            onClick={() => navigate('/analytics')}
+          >
+            <BarChart2 size={14} className="inline mr-1" />
+            Analytics
+          </button>
+        </div>
+      </div>
+
+      {/* Collapsible page row navigator */}
+      <div className="bg-gray-50 border-b border-gray-200 px-6 py-2 overflow-x-auto shrink-0">
+        <div className="flex items-center gap-2">
+          {pages.map((page) => {
+            const pageRows = rows
+              .map((r, i) => ({ row: r, index: i }))
+              .filter(({ row }) => (row.page ?? 1) === page)
+            const isExpanded = expandedPage === page
+            const hasCurrentRow = currentPage === page
+
+            return (
+              <div key={page} className="flex items-center gap-1 shrink-0">
+                <button
+                  onClick={() => {
+                    setExpandedPage((prev) => (prev === page ? null : page))
+                    setActiveSheet(page)
+                    jumpToPage(page)
+                  }}
+                  className={`h-7 rounded px-3 text-xs font-semibold transition-colors ${
+                    isExpanded || hasCurrentRow
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-white text-slate-600 border border-slate-300 hover:bg-slate-100'
+                  }`}
+                  type="button"
+                  title={`Show rows from page ${page}`}
+                >
+                  P{page}
+                </button>
+
+                {isExpanded && (
+                  <div className="flex items-center gap-1 rounded border border-slate-200 bg-white px-2 py-1">
+                    {pageRows.map(({ row: r, index: i }) => (
+                      <button
+                        key={r.id}
+                        onClick={() => setIdx(i)}
+                        title={`Row ${i + 1}: ${r.operation_number ?? '?'} (page ${r.page ?? 1})`}
+                        className={`h-5 w-5 rounded-sm transition-all ${
+                          i === idx ? 'ring-2 ring-blue-500 scale-110' : ''
+                        } ${
+                          r.review_status === 'APPROVED'
+                            ? 'bg-green-400'
+                            : r.review_status === 'REJECTED'
+                            ? 'bg-red-400'
+                            : r.review_status === 'REVIEWED'
+                            ? 'bg-yellow-400'
+                            : 'bg-gray-300'
+                        }`}
+                        type="button"
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      </div>
+
+      {/* Spreadsheet review layout */}
+      <div ref={reviewLayoutRef} className="flex flex-1 overflow-hidden bg-white">
+        <div
+          className="min-w-0 shrink-0 flex flex-col bg-slate-50"
+          style={{ width: `calc(${sheetPanelPercent}% - 6px)` }}
+        >
+          <div className="flex items-center gap-2 overflow-x-auto border-b border-slate-200 bg-white px-3 py-2">
+            <button
+              className={`rounded px-3 py-1.5 text-sm font-medium ${activeSheet === 'ALL' ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}`}
+              onClick={() => setActiveSheet('ALL')}
+              type="button"
+            >
+              All
+            </button>
+            <div className="ml-auto flex shrink-0 items-center gap-3">
+              <label className="flex items-center gap-2 rounded border border-slate-200 px-2 py-1 text-xs font-medium text-slate-600">
+                <input
+                  type="checkbox"
+                  checked={showConfidence}
+                  onChange={(e) => setShowConfidence(e.target.checked)}
+                />
+                AI confidence
+              </label>
+              <label className="flex items-center gap-2 text-xs font-medium text-slate-600">
+                Columns
+                <input
+                  className="w-24"
+                  type="range"
+                  min="75"
+                  max="150"
+                  value={sheetZoom}
+                  onChange={(e) => setSheetZoom(Number(e.target.value))}
+                  title="Zoom sheet columns"
+                />
+                <span className="w-9 text-right font-mono">{sheetZoom}%</span>
+              </label>
+              <label className="flex items-center gap-2 text-xs font-medium text-slate-600">
+                Row
+                <input
+                  className="w-20"
+                  type="range"
+                  min="28"
+                  max="64"
+                  value={rowHeight}
+                  onChange={(e) => setRowHeight(Number(e.target.value))}
+                />
+              </label>
+              <button
+                className="btn-secondary flex items-center gap-1 py-1.5 px-2 text-xs"
+                onClick={() => gridApiRef.current?.autoSizeAllColumns()}
+                type="button"
+                title="Auto-size columns"
+              >
+                <Columns3 size={14} /> Auto
+              </button>
+              <button
+                className="btn-secondary flex items-center gap-1 py-1.5 px-2 text-xs"
+                onClick={() => gridApiRef.current?.exportDataAsCsv({ fileName: 'ocr-review.csv' })}
+                type="button"
+                title="Export CSV"
+              >
+                <Download size={14} /> CSV
+              </button>
+            </div>
+          </div>
+
+          <style>{`
+            .review-sheet.ag-theme-quartz {
+              --ag-font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+              --ag-header-background-color: #f8fafc;
+              --ag-header-foreground-color: #334155;
+              --ag-border-color: #cbd5e1;
+              --ag-row-hover-color: #eef6ff;
+              --ag-selected-row-background-color: #dbeafe;
+            }
+            .review-sheet .ag-header-cell,
+            .review-sheet .ag-cell {
+              border-right: 1px solid #cbd5e1 !important;
+            }
+            .review-sheet .ag-header-cell:last-child,
+            .review-sheet .ag-cell:last-child {
+              border-right: 0 !important;
+            }
+            .review-sheet .review-grid-selected .ag-cell {
+              box-shadow: inset 0 0 0 1px #2563eb;
+            }
+            .review-sheet .ag-cell.review-confidence-low {
+              color: #b91c1c;
+            }
+            .review-sheet .ag-cell.review-confidence-medium {
+              color: #1d4ed8;
+            }
+          `}</style>
+          <div className="review-sheet ag-theme-quartz flex-1 min-h-0">
+            <AgGridReact<SheetRow>
+              rowData={sheetRows}
+              columnDefs={columnDefs}
+              defaultColDef={{
+                resizable: true,
+                sortable: true,
+                filter: true,
+                editable: true,
+                suppressKeyboardEvent: ({ event }) => event.key === 'Enter' && saving,
+              }}
+              onGridReady={(event) => { gridApiRef.current = event.api }}
+              onRowClicked={(event: RowClickedEvent<SheetRow>) => {
+                if (event.data) selectRowById(event.data.id)
+              }}
+              onCellValueChanged={saveGridEdit}
+              getRowClass={getGridRowClass}
+              rowSelection="multiple"
+              rowHeight={rowHeight}
+              headerHeight={38}
+              animateRows
+              suppressDragLeaveHidesColumns
+              stopEditingWhenCellsLoseFocus
+            />
+          </div>
+        </div>
+        <div
+          className="group flex w-3 shrink-0 cursor-col-resize items-center justify-center border-x border-slate-300 bg-slate-200 hover:bg-blue-100"
+          onPointerDown={startPanelResize}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize Excel sheet and image"
+          title="Drag left/right to resize Excel sheet and image"
+        >
+          <div className="h-14 w-1 rounded-full bg-slate-400 group-hover:bg-blue-500" />
+        </div>
+        <div className="hidden">
+          <table className="min-w-[980px] w-full border-collapse text-sm">
+            <thead className="sticky top-0 z-10 bg-slate-900 text-white">
+              <tr className="[&>th]:border-r [&>th]:border-slate-700 [&>th]:px-2 [&>th]:py-2 [&>th]:text-left [&>th]:text-xs [&>th]:font-semibold [&>th]:uppercase">
+                <th className="w-16">Card</th>
+                <th className="w-14">Page</th>
+                <th className="w-14">Row</th>
+                <th className="w-28">Opn Code</th>
+                <th>Process</th>
+                <th className="w-32">Date</th>
+                <th className="w-56">Measurements</th>
+                <th className="w-24">Result</th>
+                <th className="w-20">Done</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, i) => {
+                const selected = i === idx
+                const rowFlags = isSuspicious(r)
+                const locked = r.review_status === 'APPROVED'
+                const rejected = r.review_status === 'REJECTED'
+                return (
+                  <tr
+                    key={r.id}
+                    onClick={() => setIdx(i)}
+                    className={`border-b border-slate-200 cursor-pointer align-top ${
+                      selected ? 'bg-blue-50 ring-1 ring-inset ring-blue-400' : ''
+                    } ${rejected ? 'bg-red-50 text-red-800' : ''}`}
+                  >
+                    <td className="border-r border-slate-200 px-2 py-2 font-semibold text-slate-700">
+                      #{i + 1}
+                      <div className="text-[10px] font-normal text-slate-400">Card</div>
+                    </td>
+                    <td className="border-r border-slate-200 px-2 py-2 font-mono text-slate-600">
+                      {r.page ?? 1}
+                    </td>
+                    <td className="border-r border-slate-200 px-2 py-2 font-mono text-slate-600">
+                      {i + 1}
+                    </td>
+                    <td className="border-r border-slate-200 px-2 py-2">
+                      {selected && !locked ? (
+                        <input
+                          className={`w-full rounded border px-2 py-1 font-mono text-sm ${
+                            flags.operation_number ? 'border-red-400 bg-red-50' : 'border-slate-300'
+                          }`}
+                          value={editOpNum}
+                          onChange={(e) => setEditOpNum(e.target.value)}
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                      ) : (
+                        <span className={`font-mono font-semibold ${rowFlags.operation_number ? 'text-red-600' : ''}`}>
+                          {r.operation_number || '-'}
+                        </span>
+                      )}
+                    </td>
+                    <td className="border-r border-slate-200 px-2 py-2">
+                      {selected && !locked ? (
+                        <input
+                          className={`w-full rounded border px-2 py-1 text-sm ${
+                            flags.process_name ? 'border-red-400 bg-red-50' : 'border-slate-300'
+                          }`}
+                          value={editProcName}
+                          onChange={(e) => setEditProcName(e.target.value)}
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                      ) : (
+                        <span className={rowFlags.process_name ? 'text-red-600' : ''}>
+                          {r.process_name || '-'}
+                        </span>
+                      )}
+                    </td>
+                    <td className="border-r border-slate-200 px-2 py-2">
+                      {selected && !locked ? (
+                        <input
+                          type="date"
+                          className={`w-full rounded border px-2 py-1 text-sm ${
+                            flags.audit_date ? 'border-amber-400 bg-amber-50' : 'border-slate-300'
+                          }`}
+                          value={editDate}
+                          onChange={(e) => setEditDate(e.target.value)}
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                      ) : (
+                        r.audit_date || '-'
+                      )}
+                    </td>
+                    <td className="border-r border-slate-200 px-2 py-2">
+                      {selected && !locked ? (
+                        <div className="flex flex-wrap gap-1" onClick={(e) => e.stopPropagation()}>
+                          {editMeasurements.map((val, mIdx) => (
+                            <input
+                              key={mIdx}
+                              type="number"
+                              step="0.01"
+                              className={`w-16 rounded border px-1 py-1 text-center font-mono text-sm ${
+                                val === '' || isNaN(Number(val)) ? 'border-red-400 bg-red-50' : 'border-slate-300'
+                              }`}
+                              value={val}
+                              onChange={(e) => updateMeasurement(mIdx, e.target.value)}
+                            />
+                          ))}
+                          <button
+                            className="rounded border border-blue-200 px-2 text-xs text-blue-700 hover:bg-blue-50"
+                            onClick={addMeasurement}
+                            type="button"
+                          >
+                            +
+                          </button>
+                        </div>
+                      ) : (
+                        <span className={`font-mono ${rowFlags.measurements ? 'text-red-700 font-semibold' : ''}`}>
+                          {r.measurements.length ? r.measurements.join(', ') : '-'}
+                        </span>
+                      )}
+                    </td>
+                    <td className="border-r border-slate-200 px-2 py-2">
+                      {selected && !locked ? (
+                        <select
+                          className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
+                          value={editJudgement}
+                          onChange={(e) => setEditJudgement(e.target.value)}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <option value="">-</option>
+                          <option value="OK">OK</option>
+                          <option value="NOK">NOK</option>
+                        </select>
+                      ) : (
+                        <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold ${
+                          r.judgement === 'NOK' ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'
+                        }`}>
+                          {r.judgement || '-'}
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-2 py-2">
+                      {locked ? (
+                        <span className="text-green-600">✓</span>
+                      ) : rejected ? (
+                        <span className="text-red-600">×</span>
+                      ) : selected ? (
+                        <div className="flex gap-2" onClick={(e) => e.stopPropagation()}>
+                          <button className="text-green-600 hover:text-green-800" onClick={handleApprove} title="Approve">
+                            ✓
+                          </button>
+                          <button className="text-red-500 hover:text-red-700" onClick={handleReject} title="Reject">
+                            ×
+                          </button>
+                        </div>
+                      ) : (
+                        <span className="text-slate-300">-</span>
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        <div
+          className="min-w-0 shrink-0 flex flex-col overflow-hidden bg-slate-100"
+          style={{ width: `calc(${100 - sheetPanelPercent}% - 6px)` }}
+        >
+          <div className="flex items-center justify-between gap-3 bg-slate-900 px-3 py-2 text-white">
+            <div>
+              <span className="font-mono text-xs">#{idx + 1} · page {row?.page ?? '?'} · row {idx + 1}</span>
+              {row?.row_image_path && (
+                <p className="mt-0.5 text-[10px] font-medium uppercase tracking-wide text-blue-200">
+                  {isRowCrop(row.row_image_path) ? 'Selected row crop' : 'Selected page image'}
+                </p>
+              )}
+            </div>
+            <div className="flex items-center gap-3">
+              <span className="text-xs font-medium text-slate-300">
+                Drag image to pan
+              </span>
+              {row && <StatusBadge status={row.review_status} />}
+            </div>
+          </div>
+          <div
+            ref={imagePaneRef}
+            className={`relative flex flex-1 touch-none select-none items-center justify-center overflow-hidden bg-slate-200 p-4 ${isImagePanning ? 'cursor-grabbing' : 'cursor-grab'}`}
+            onPointerDown={handleImagePointerDown}
+            onPointerMove={handleImagePointerMove}
+            onPointerUp={stopImagePan}
+            onPointerCancel={stopImagePan}
+            onWheel={handleImageWheel}
+          >
+            {row?.row_image_path ? (
+              <img
+                key={`${row.id}-${row.row_image_path}`}
+                src={rowImageUrl(row.row_image_path)}
+                alt={`Row ${idx + 1} source image`}
+                draggable={false}
+                className="max-h-[92%] max-w-[92%] rounded-sm bg-white shadow-lg ring-2 ring-blue-500/60 transition-transform duration-100 ease-out"
+                style={{
+                  imageRendering: 'crisp-edges',
+                  transform: imageTransform,
+                  transformOrigin: 'center center',
+                }}
+              />
+            ) : (
+              <div className="mt-20 text-center text-sm text-slate-500">No image available</div>
+            )}
+            {row?.row_image_path && (
+              <div
+                className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-2 rounded-md bg-slate-950/90 px-3 py-2 text-white shadow-xl backdrop-blur"
+                onPointerDown={(event) => event.stopPropagation()}
+              >
+                <select
+                  className="h-9 rounded border border-slate-600 bg-slate-800 px-2 text-sm font-semibold text-white outline-none"
+                  value={imageZoom}
+                  onChange={(event) => updateImageZoom(Number(event.target.value))}
+                  title="Zoom level"
+                >
+                  {!IMAGE_ZOOM_LEVELS.includes(imageZoom) && (
+                    <option value={imageZoom}>{imageZoom}%</option>
+                  )}
+                  {IMAGE_ZOOM_LEVELS.map((level) => (
+                    <option key={level} value={level}>
+                      {level}%
+                    </option>
+                  ))}
+                </select>
+                <button
+                  className="flex h-9 w-10 items-center justify-center rounded bg-slate-800 text-white hover:bg-slate-700"
+                  onClick={() => updateImageZoom(imageZoom + 10)}
+                  title="Zoom in"
+                  type="button"
+                >
+                  <Plus size={18} />
+                </button>
+                <button
+                  className="flex h-9 w-10 items-center justify-center rounded bg-slate-800 text-white hover:bg-slate-700"
+                  onClick={() => updateImageZoom(imageZoom - 10)}
+                  title="Zoom out"
+                  type="button"
+                >
+                  <Minus size={18} />
+                </button>
+                <button
+                  className="flex h-9 w-10 items-center justify-center rounded bg-slate-800 text-white hover:bg-slate-700"
+                  onClick={() => setImageRotation((value) => value - 90)}
+                  title="Rotate left"
+                  type="button"
+                >
+                  <RotateCcw size={18} />
+                </button>
+                <button
+                  className="flex h-9 w-10 items-center justify-center rounded bg-slate-800 text-white hover:bg-slate-700"
+                  onClick={() => setImageRotation((value) => value + 90)}
+                  title="Rotate right"
+                  type="button"
+                >
+                  <RotateCw size={18} />
+                </button>
+                <button
+                  className="flex h-9 items-center gap-2 rounded bg-slate-800 px-3 text-sm font-semibold text-white hover:bg-slate-700"
+                  onClick={resetImageView}
+                  title="Reset view"
+                  type="button"
+                >
+                  <RefreshCw size={16} />
+                  Reset view
+                </button>
+              </div>
+            )}
+          </div>
+          <div className="flex items-center gap-3 border-t border-slate-300 bg-white px-4 py-3">
+            <button className="btn-secondary py-2 px-3" onClick={() => nav(-1)} disabled={idx === 0 || saving}>
+              <ChevronLeft size={16} />
+            </button>
+            <button className="btn-secondary py-2 px-3" onClick={() => nav(1)} disabled={idx === rows.length - 1 || saving}>
+              <ChevronRight size={16} />
+            </button>
+            <div className="flex-1" />
+            {row?.review_status !== 'APPROVED' && row?.review_status !== 'REJECTED' && (
+              <>
+                <button className="btn-danger flex items-center gap-2" onClick={handleReject} disabled={saving}>
+                  <X size={16} /> Reject
+                </button>
+                <button className="btn-success flex items-center gap-2" onClick={handleApprove} disabled={saving}>
+                  {saving ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />}
+                  Approve
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Main split */}
+      <div className="hidden">
+        {/* LEFT — page image */}
+        <div className="w-1/2 bg-gray-800 flex flex-col overflow-hidden border-r border-gray-700">
+          <div className="px-4 py-2 bg-gray-900 flex items-center justify-between">
+            <span className="text-gray-300 text-xs font-mono">
+              PDF page {row?.page ?? '?'} · Row {idx + 1}
+            </span>
+            {row && <StatusBadge status={row.review_status} />}
+          </div>
+          <div className="flex-1 overflow-auto p-3 flex items-start justify-center">
+            {row?.row_image_path ? (
+              <img
+                src={rowImageUrl(row.row_image_path)}
+                alt={`Row ${idx + 1} source image`}
+                className="w-full rounded shadow-md bg-white"
+                style={{ imageRendering: 'crisp-edges' }}
+              />
+            ) : (
+              <div className="text-gray-500 text-sm mt-20 text-center">
+                <p>No image available</p>
+                <p className="text-xs mt-1">Image was not captured during extraction</p>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* RIGHT — editable fields */}
+        <div className="w-1/2 flex flex-col overflow-hidden bg-white">
+          <div className="flex-1 overflow-y-auto px-6 py-5">
+            {row && (
+              <div className="space-y-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">
+                    Extracted Data
+                  </span>
+                  <StatusBadge status={row.review_status} />
+                </div>
+
+                {/* Operation Number */}
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">
+                    Operation Number
+                    {flags.operation_number && (
+                      <span className="ml-2 text-red-500 text-xs">⚠ missing</span>
+                    )}
+                  </label>
+                  <input
+                    className={`input-field font-mono ${flags.operation_number ? 'input-error' : ''}`}
+                    value={editOpNum}
+                    onChange={(e) => setEditOpNum(e.target.value)}
+                    placeholder="e.g. 1140"
+                    disabled={row.review_status === 'APPROVED'}
+                  />
+                </div>
+
+                {/* Process Name */}
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">
+                    Process Name
+                    {flags.process_name && (
+                      <span className="ml-2 text-red-500 text-xs">⚠ missing</span>
+                    )}
+                  </label>
+                  <input
+                    className={`input-field ${flags.process_name ? 'input-error' : ''}`}
+                    value={editProcName}
+                    onChange={(e) => setEditProcName(e.target.value)}
+                    placeholder="e.g. MB Cap tightening"
+                    disabled={row.review_status === 'APPROVED'}
+                  />
+                </div>
+
+                {/* Audit Date */}
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">
+                    Audit Date
+                    {flags.audit_date && (
+                      <span className="ml-2 text-amber-600 text-xs">⚠ not detected</span>
+                    )}
+                  </label>
+                  <input
+                    type="date"
+                    className={`input-field ${flags.audit_date ? 'input-error' : ''}`}
+                    value={editDate}
+                    onChange={(e) => setEditDate(e.target.value)}
+                    disabled={row.review_status === 'APPROVED'}
+                  />
+                </div>
+
+                {/* Judgement */}
+                <div>
+                  <label className="block text-xs font-medium text-gray-600 mb-1">
+                    Judgement
+                    {flags.judgement && (
+                      <span className="ml-2 text-red-500 text-xs">⚠ unclear</span>
+                    )}
+                  </label>
+                  <select
+                    className={`input-field ${flags.judgement ? 'input-error' : ''}`}
+                    value={editJudgement}
+                    onChange={(e) => setEditJudgement(e.target.value)}
+                    disabled={row.review_status === 'APPROVED'}
+                  >
+                    <option value="">— select —</option>
+                    <option value="OK">OK</option>
+                    <option value="NOK">NOK</option>
+                  </select>
+                </div>
+
+                {/* Measurements */}
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-xs font-medium text-gray-600">
+                      Measurements ({editMeasurements.length})
+                      {flags.measurements && (
+                        <span className="ml-2 text-red-500 text-xs">⚠ check values</span>
+                      )}
+                    </label>
+                    {row.review_status !== 'APPROVED' && (
+                      <button
+                        className="text-blue-600 hover:text-blue-700 text-xs flex items-center gap-1"
+                        onClick={addMeasurement}
+                      >
+                        <Plus size={12} /> Add
+                      </button>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-6 gap-2">
+                    {editMeasurements.map((val, i) => (
+                      <div key={i} className="relative">
+                        <input
+                          type="number"
+                          className={`input-field font-mono text-center pr-6 ${
+                            isNaN(Number(val)) || val === '' ? 'input-error' : ''
+                          }`}
+                          value={val}
+                          onChange={(e) => updateMeasurement(i, e.target.value)}
+                          placeholder="0"
+                          disabled={row.review_status === 'APPROVED'}
+                        />
+                        {row.review_status !== 'APPROVED' && (
+                          <button
+                            className="absolute right-1 top-1/2 -translate-y-1/2 text-gray-400 hover:text-red-500"
+                            onClick={() => removeMeasurement(i)}
+                          >
+                            <Minus size={12} />
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                    {editMeasurements.length === 0 && (
+                      <p className="col-span-6 text-xs text-red-500">No measurements extracted</p>
+                    )}
+                  </div>
+                </div>
+
+                {/* ── Model Comparison Panel ── */}
+                {false && row.agreement_score !== null && row.agreement_score !== undefined && (
+                  <div className="mt-4 border border-gray-200 rounded-lg overflow-hidden">
+                    <div className="px-4 py-2 bg-gray-50 border-b border-gray-200 flex items-center justify-between">
+                      <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                        Model Comparison
+                      </span>
+                      {(row.agreement_score ?? 0) >= 80 ? (
+                        <span className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-green-100 text-green-700">
+                          ✓ Models agree
+                        </span>
+                      ) : (row.agreement_score ?? 0) >= 50 ? (
+                        <span className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">
+                          ⚠ Partial disagreement
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full bg-red-100 text-red-700">
+                          ✗ Major disagreement
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="px-4 py-3 space-y-2">
+                      {/* Score bar */}
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-gray-400 w-20 shrink-0">Agreement</span>
+                        <div className="flex-1 bg-gray-200 rounded-full h-1.5">
+                          <div
+                            className={`h-1.5 rounded-full transition-all ${
+                              (row.agreement_score ?? 0) >= 80 ? 'bg-green-500' :
+                              (row.agreement_score ?? 0) >= 50 ? 'bg-amber-500' : 'bg-red-500'
+                            }`}
+                            style={{ width: `${row.agreement_score}%` }}
+                          />
+                        </div>
+                        <span className="text-xs font-mono text-gray-600 w-8 text-right">
+                          {row.agreement_score}
+                        </span>
+                      </div>
+
+                      {/* Disagreements list */}
+                      {row.disagreements?.length > 0 && (
+                        <div className="space-y-1">
+                          {row.disagreements.map((d, i) => (
+                            <p key={i} className="text-xs text-amber-700 bg-amber-50 rounded px-2 py-1 font-mono">
+                              {d}
+                            </p>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Side-by-side raw results for major disagreement */}
+                      {(row.agreement_score ?? 0) < 50 && (row.gemini_raw || row.gpt4o_raw) && (
+                        <div className="grid grid-cols-2 gap-2 mt-2">
+                          <div className="bg-blue-50 rounded p-2">
+                            <p className="text-xs font-semibold text-blue-700 mb-1">Gemini</p>
+                            <p className="text-xs text-blue-600 font-mono">
+                              op: {(row.gemini_raw as any)?.operation_number ?? '—'}
+                            </p>
+                            <p className="text-xs text-blue-600 font-mono">
+                              judge: {(row.gemini_raw as any)?.judgement ?? '—'}
+                            </p>
+                            <p className="text-xs text-blue-600 font-mono">
+                              meas: [{((row.gemini_raw as any)?.measurements ?? []).join(', ')}]
+                            </p>
+                          </div>
+                          <div className="bg-purple-50 rounded p-2">
+                            <p className="text-xs font-semibold text-purple-700 mb-1">GPT-4o</p>
+                            <p className="text-xs text-purple-600 font-mono">
+                              op: {(row.gpt4o_raw as any)?.operation_number ?? '—'}
+                            </p>
+                            <p className="text-xs text-purple-600 font-mono">
+                              judge: {(row.gpt4o_raw as any)?.judgement ?? '—'}
+                            </p>
+                            <p className="text-xs text-purple-600 font-mono">
+                              meas: [{((row.gpt4o_raw as any)?.measurements ?? []).join(', ')}]
+                            </p>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Action bar */}
+          <div className="border-t border-gray-200 px-6 py-4 flex items-center gap-3 shrink-0 bg-gray-50">
+            <button
+              className="btn-secondary py-2 px-3"
+              onClick={() => nav(-1)}
+              disabled={idx === 0 || saving}
+            >
+              <ChevronLeft size={16} />
+            </button>
+            <button
+              className="btn-secondary py-2 px-3"
+              onClick={() => nav(1)}
+              disabled={idx === rows.length - 1 || saving}
+            >
+              <ChevronRight size={16} />
+            </button>
+
+            <div className="flex-1" />
+
+            {row?.review_status !== 'APPROVED' && row?.review_status !== 'REJECTED' && (
+              <>
+                <button
+                  className="btn-danger flex items-center gap-2"
+                  onClick={handleReject}
+                  disabled={saving}
+                  title="Reject (R)"
+                >
+                  <X size={16} /> Reject
+                </button>
+                <button
+                  className="btn-success flex items-center gap-2"
+                  onClick={handleApprove}
+                  disabled={saving}
+                  title="Approve (A)"
+                >
+                  {saving ? <Loader2 size={16} className="animate-spin" /> : <Check size={16} />}
+                  Approve
+                </button>
+              </>
+            )}
+            {row?.review_status === 'APPROVED' && (
+              <span className="text-green-700 text-sm font-medium flex items-center gap-1">
+                <Check size={14} /> Approved
+              </span>
+            )}
+            {row?.review_status === 'REJECTED' && (
+              <span className="text-red-700 text-sm font-medium flex items-center gap-1">
+                <X size={14} /> Rejected
+              </span>
+            )}
+          </div>
+
+          {/* Keyboard hint */}
+          <div className="px-6 py-2 bg-gray-50 border-t border-gray-100 text-xs text-gray-400 flex gap-4">
+            <span>← → Navigate</span>
+            <span>A Approve</span>
+            <span>R Reject</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}

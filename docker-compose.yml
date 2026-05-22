@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: stellantis_quality
+      POSTGRES_USER: quality_user
+      POSTGRES_PASSWORD: quality_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U quality_user -d stellantis_quality"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://quality_user:quality_pass@postgres:5432/stellantis_quality
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      UPLOAD_DIR: /app/static/uploads
+      ROW_IMAGES_DIR: /app/static/row_images
+    volumes:
+      - ./backend:/app
+      - static_data:/app/static
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_URL: http://localhost:8000
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
+  static_data:
