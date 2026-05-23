@@ -22,7 +22,9 @@ CREATE TABLE IF NOT EXISTS extracted_operations (
     upload_id        UUID REFERENCES uploads(id) ON DELETE SET NULL,
     audit_date       DATE,
     operation_number VARCHAR(50),
+    engine_number    VARCHAR(50),
     process_name     TEXT,
+    quantity         INTEGER,
     judgement        VARCHAR(10),
     measurements_json JSONB,         -- e.g. [33, 33, 33, 33]
     raw_ocr_json     JSONB,          -- raw Gemini response stored verbatim

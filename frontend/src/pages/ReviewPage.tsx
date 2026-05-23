@@ -76,14 +76,17 @@ function StatusBadge({ status }: { status: string }) {
 function isSuspicious(row: ExtractedRow): Record<string, boolean> {
   const repeatedMeasurements =
     row.measurements.length >= 4 && new Set(row.measurements.map(String)).size <= 2
+  const quantity = Number.isFinite(row.quantity) ? Number(row.quantity) : null
   return {
     operation_number: !row.operation_number,
     process_name: !row.process_name,
     audit_date: !row.audit_date,
+    quantity: quantity === null || quantity < 0 || row.measurements.length > quantity,
     judgement: !row.judgement || !['OK', 'NOK'].includes(row.judgement.toUpperCase()),
     measurements:
       row.measurements.length === 0 ||
-      row.measurements.some((m) => isNaN(m)) ||
+      row.measurements.some((m) => typeof m !== 'number' || isNaN(m)) ||
+      (quantity !== null && row.measurements.length !== quantity) ||
       repeatedMeasurements,
   }
 }
@@ -98,6 +101,62 @@ type SheetRow = ExtractedRow & {
 
 const DEFAULT_TORQUE_VALUE_COLUMNS = 6
 const IMAGE_ZOOM_LEVELS = [50, 75, 100, 125, 150, 175, 200, 250, 300]
+
+function allowedMeasurementCount(row?: Pick<ExtractedRow, 'quantity' | 'measurements'> | null) {
+  if (!row || row.quantity === null || row.quantity === undefined || Number.isNaN(Number(row.quantity))) {
+    return DEFAULT_TORQUE_VALUE_COLUMNS
+  }
+  return Math.max(0, Number(row.quantity))
+}
+
+function numericMeasurements(values: Array<string | number>, quantity?: number | null) {
+  const limit = quantity === null || quantity === undefined ? values.length : Math.max(0, Number(quantity))
+  return values
+    .slice(0, limit)
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value))
+}
+
+function valueMissing(row: Pick<ExtractedRow, 'quantity' | 'measurements'>, index: number) {
+  if (row.quantity === null || row.quantity === undefined) return false
+  if (index >= allowedMeasurementCount(row)) return false
+  const value = row.measurements[index]
+  return typeof value !== 'number' || !Number.isFinite(value)
+}
+
+function isRealOperationNumber(value?: string | null) {
+  const text = String(value ?? '').trim()
+  return Boolean(text && !['-', '—', '_'].includes(text) && /\d/.test(text))
+}
+
+function mergeWrappedRows(sourceRows: ExtractedRow[]) {
+  const merged: ExtractedRow[] = []
+  let current: ExtractedRow | null = null
+
+  sourceRows.forEach((row) => {
+    if (isRealOperationNumber(row.operation_number)) {
+      const measurements = row.measurements.filter((value) => Number.isFinite(Number(value)))
+      const quantity = Math.max(row.quantity ?? 0, measurements.length) || row.quantity
+      current = { ...row, quantity, measurements }
+      merged.push(current)
+      return
+    }
+
+    if (!current || (current.page ?? 1) !== (row.page ?? 1) || row.measurements.length === 0) {
+      merged.push(row)
+      return
+    }
+
+    const measurements = [
+      ...current.measurements,
+      ...row.measurements.filter((value) => Number.isFinite(Number(value))),
+    ]
+    current.measurements = measurements
+    current.quantity = Math.max(current.quantity ?? 0, row.quantity ?? 0, measurements.length)
+  })
+
+  return merged
+}
 
 function clampImageZoom(value: number) {
   return Math.max(40, Math.min(400, value))
@@ -285,7 +344,9 @@ export default function ReviewPage() {
 
   // Local editable state for the current row
   const [editOpNum, setEditOpNum] = useState('')
+  const [editEngineNo, setEditEngineNo] = useState('')
   const [editProcName, setEditProcName] = useState('')
+  const [editQuantity, setEditQuantity] = useState('')
   const [editDate, setEditDate] = useState('')
   const [editJudgement, setEditJudgement] = useState('')
   const [editMeasurements, setEditMeasurements] = useState<string[]>([])
@@ -328,10 +389,12 @@ export default function ReviewPage() {
   useEffect(() => {
     if (!row) return
     setEditOpNum(row.operation_number ?? '')
+    setEditEngineNo(row.engine_number ?? '')
     setEditProcName(row.process_name ?? '')
+    setEditQuantity(row.quantity?.toString() ?? '')
     setEditDate(row.audit_date ?? '')
     setEditJudgement(row.judgement ?? '')
-    setEditMeasurements(row.measurements.map(String))
+    setEditMeasurements(row.measurements.slice(0, allowedMeasurementCount(row)).map(String))
   }, [row?.id])
 
   useEffect(() => {
@@ -417,18 +480,22 @@ export default function ReviewPage() {
   // Build payload from editable fields
   const buildPayload = () => ({
     operation_number: editOpNum || undefined,
+    engine_number: editEngineNo || undefined,
     process_name: editProcName || undefined,
+    quantity: editQuantity === '' ? undefined : Number(editQuantity),
     audit_date: editDate || undefined,
     judgement: editJudgement || undefined,
-    measurements: editMeasurements.map(Number).filter((n) => !isNaN(n)),
+    measurements: numericMeasurements(editMeasurements, editQuantity === '' ? undefined : Number(editQuantity)),
   })
 
   const buildPayloadFromRow = (source: ExtractedRow) => ({
     operation_number: source.operation_number || undefined,
+    engine_number: source.engine_number || undefined,
     process_name: source.process_name || undefined,
+    quantity: source.quantity ?? undefined,
     audit_date: source.audit_date || undefined,
     judgement: source.judgement || undefined,
-    measurements: source.measurements,
+    measurements: numericMeasurements(source.measurements, source.quantity),
   })
 
   const handleApprove = async () => {
@@ -531,7 +598,11 @@ export default function ReviewPage() {
     }
   }
 
-  const addMeasurement = () => setEditMeasurements((m) => [...m, ''])
+  const addMeasurement = () =>
+    setEditMeasurements((m) => {
+      const limit = editQuantity === '' ? DEFAULT_TORQUE_VALUE_COLUMNS : Math.max(0, Number(editQuantity))
+      return m.length >= limit ? m : [...m, '']
+    })
   const removeMeasurement = (i: number) =>
     setEditMeasurements((m) => m.filter((_, j) => j !== i))
   const updateMeasurement = (i: number, val: string) =>
@@ -569,22 +640,29 @@ export default function ReviewPage() {
 
   const sheetRows = useMemo<SheetRow[]>(() => {
     const visible = activeSheet === 'ALL'
-      ? rows
-      : rows.filter((r) => (r.page ?? 1) === activeSheet)
+      ? mergeWrappedRows(rows)
+      : mergeWrappedRows(rows.filter((r) => (r.page ?? 1) === activeSheet))
 
     return visible.flatMap((r) => {
-      const chunks = Math.max(1, Math.ceil(r.measurements.length / DEFAULT_TORQUE_VALUE_COLUMNS))
+      const allowedCount = allowedMeasurementCount(r)
+      const visibleMeasurements = r.measurements.slice(0, allowedCount)
+      const chunkBasis = r.quantity === null || r.quantity === undefined
+        ? Math.max(visibleMeasurements.length, 1)
+        : Math.max(allowedCount, 1)
+      const chunks = Math.max(1, Math.ceil(chunkBasis / DEFAULT_TORQUE_VALUE_COLUMNS))
       return Array.from({ length: chunks }, (_, chunkIndex) => {
         const measurementOffset = chunkIndex * DEFAULT_TORQUE_VALUE_COLUMNS
         const flat: SheetRow = {
           ...r,
           row_number: rows.findIndex((x) => x.id === r.id) + 1,
-          measurement_count: r.measurements.length,
+          measurement_count: visibleMeasurements.length,
           measurement_offset: measurementOffset,
           is_continuation: chunkIndex > 0,
         }
         for (let i = 0; i < measurementColumnCount; i++) {
-          flat[`m${i}`] = r.measurements[measurementOffset + i] ?? null
+          flat[`m${i}`] = measurementOffset + i < allowedCount
+            ? visibleMeasurements[measurementOffset + i] ?? null
+            : null
         }
         return flat
       })
@@ -639,11 +717,19 @@ export default function ReviewPage() {
 
     const next: ExtractedRow = { ...base }
     if (field === 'operation_number') next.operation_number = edited.operation_number ?? null
+    if (field === 'engine_number') next.engine_number = edited.engine_number ?? null
     if (field === 'process_name') next.process_name = edited.process_name ?? null
+    if (field === 'quantity') {
+      const quantity = event.newValue === '' || event.newValue === null ? null : Number(event.newValue)
+      next.quantity = quantity !== null && Number.isFinite(quantity) ? Math.max(0, Math.floor(quantity)) : null
+      next.measurements = numericMeasurements(base.measurements, next.quantity)
+    }
     if (field === 'audit_date') next.audit_date = edited.audit_date ?? null
     if (field === 'judgement') next.judgement = edited.judgement ?? null
     if (/^m\d+$/.test(field)) {
       const measurementIndex = (edited.measurement_offset ?? 0) + Number(field.slice(1))
+      const allowedCount = allowedMeasurementCount(base)
+      if (measurementIndex >= allowedCount) return
       const measurements = [...base.measurements]
       const value = event.newValue === '' || event.newValue === null ? null : Number(event.newValue)
       if (value === null || Number.isNaN(value)) {
@@ -651,7 +737,7 @@ export default function ReviewPage() {
       } else {
         measurements[measurementIndex] = value
       }
-      next.measurements = measurements.filter((value) => value !== undefined)
+      next.measurements = numericMeasurements(measurements.filter((value) => value !== undefined), base.quantity)
     }
 
     setRows((prev) => prev.map((r) => (r.id === next.id ? { ...next, review_status: 'REVIEWED' } : r)))
@@ -685,25 +771,25 @@ export default function ReviewPage() {
       return { index, visibleRows }
     }
     const rowSpanForOperationGroup = (params: { api: GridApi<SheetRow>; data?: SheetRow }) => {
-      if (!params.data?.operation_number) return 1
+      if (!params.data?.id) return 1
 
       const { index, visibleRows } = findDisplayedRowIndex(params)
       if (index === -1) return 1
 
-      const currentOp = params.data.operation_number
-      if (visibleRows[index - 1]?.operation_number === currentOp) return 1
+      const currentId = params.data.id
+      if (visibleRows[index - 1]?.id === currentId) return 1
 
       let span = 1
       for (let i = index + 1; i < visibleRows.length; i++) {
-        if (visibleRows[i].operation_number !== currentOp) break
+        if (visibleRows[i].id !== currentId) break
         span++
       }
       return span
     }
     const isOperationGroupContinuation = (params: { api: GridApi<SheetRow>; data?: SheetRow }) => {
-      if (!params.data?.operation_number) return false
+      if (!params.data?.id) return false
       const { index, visibleRows } = findDisplayedRowIndex(params)
-      return index > 0 && visibleRows[index - 1]?.operation_number === params.data.operation_number
+      return index > 0 && visibleRows[index - 1]?.id === params.data.id
     }
     const mergedCellStyle = (params: { api: GridApi<SheetRow>; data?: SheetRow }) => {
       const span = rowSpanForOperationGroup(params)
@@ -760,10 +846,21 @@ export default function ReviewPage() {
       headerName: `${i + 1}`,  // Just the number (1, 2, 3, 4, 5, 6)
       field: `m${i}` as keyof SheetRow & string,
       width: zoomWidth(86),
-      editable,
+      editable: (params) => editable(params) && ((params.data?.measurement_offset ?? 0) + i) < allowedMeasurementCount(params.data),
       type: 'numericColumn',
       cellEditor: 'agNumberCellEditor',
-      cellClass: confidenceCellClass('font-mono text-right', (row) => row?.confidence_scores?.measurements?.[i]),
+      cellClass: ({ data }: { data?: SheetRow }) => {
+        const classes = [
+          confidenceCellClass('font-mono text-right', (row) => row?.confidence_scores?.measurements?.[i])({ data }),
+        ]
+        const slotIndex = data ? (data.measurement_offset ?? 0) + i : i
+        if (data && slotIndex >= allowedMeasurementCount(data)) {
+          classes.push('bg-slate-50 text-slate-300')
+        } else if (data && data.quantity !== null && data.quantity !== undefined && valueMissing(data, slotIndex)) {
+          classes.push('bg-red-50 text-red-700')
+        }
+        return classes.join(' ')
+      },
       cellRenderer: ({ data, value }: { data?: SheetRow; value?: number | null }) =>
         withConfidence(value ?? '-', data?.confidence_scores?.measurements?.[i], 'right'),
       valueParser: ({ newValue }) => {
@@ -791,12 +888,32 @@ export default function ReviewPage() {
         headerName: 'Engine No',
         field: 'engine_number',
         width: zoomWidth(150),
-        editable: false,
+        editable: (params) => editable(params) && !params.data?.is_continuation,
         cellClass: confidenceCellClass('font-mono font-semibold', (row) => row?.confidence_scores?.engine_number),
         cellRenderer: (params: { api: GridApi<SheetRow>; data?: SheetRow; value?: string | null }) =>
           isOperationGroupContinuation(params)
             ? null
             : withConfidence(params.value || '-', params.data?.confidence_scores?.engine_number),
+        rowSpan: rowSpanForOperationGroup,
+        cellStyle: mergedCellStyle,
+      },
+      {
+        headerName: 'Qty',
+        field: 'quantity',
+        width: zoomWidth(82),
+        editable: (params) => editable(params) && !params.data?.is_continuation,
+        type: 'numericColumn',
+        cellEditor: 'agNumberCellEditor',
+        cellClass: confidenceCellClass('font-mono font-semibold text-right', (row) => row?.confidence_scores?.quantity),
+        cellRenderer: (params: { api: GridApi<SheetRow>; data?: SheetRow; value?: number | null }) =>
+          isOperationGroupContinuation(params)
+            ? null
+            : withConfidence(params.value ?? '-', params.data?.confidence_scores?.quantity, 'right'),
+        valueParser: ({ newValue }) => {
+          if (newValue === '' || newValue === null || newValue === undefined) return null
+          const value = Number(newValue)
+          return Number.isFinite(value) ? Math.max(0, Math.floor(value)) : null
+        },
         rowSpan: rowSpanForOperationGroup,
         cellStyle: mergedCellStyle,
       },
@@ -1114,7 +1231,7 @@ export default function ReviewPage() {
               animateRows
               suppressDragLeaveHidesColumns
               stopEditingWhenCellsLoseFocus
-              suppressRowTransform={false}
+              suppressRowTransform
             />
           </div>
         </div>

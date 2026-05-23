@@ -12,6 +12,7 @@ Endpoints:
 """
 
 import logging
+import math
 from datetime import date
 from typing import Optional
 
@@ -129,7 +130,16 @@ def get_analytics(
             "operation_number": operation_number,
             "process_name": None,
             "rows": [],
-            "stats": {"total": 0, "ok_count": 0, "nok_count": 0, "ok_pct": 0, "nok_pct": 0, "avg_torque": None},
+            "stats": {
+                "total": 0,
+                "ok_count": 0,
+                "nok_count": 0,
+                "ok_pct": 0,
+                "nok_pct": 0,
+                "avg_torque": None,
+                "cp": None,
+                "cpk": None,
+            },
         }
 
     process_name = rows[0].process_name
@@ -138,10 +148,15 @@ def get_analytics(
     ok_count = 0
     nok_count = 0
     all_measurements: list[float] = []
+    lower_limits: list[float] = []
+    upper_limits: list[float] = []
 
     for r in rows:
         measurements = r.measurements_json or []
         judgement = (r.judgement or "").upper()
+        row_data = (r.raw_ocr_json or {}).get("row_data", {}) if isinstance(r.raw_ocr_json, dict) else {}
+        lower_limit = row_data.get("lower_limit")
+        upper_limit = row_data.get("upper_limit")
 
         if judgement == "OK":
             ok_count += 1
@@ -153,6 +168,13 @@ def get_analytics(
                 all_measurements.append(float(m))
             except (TypeError, ValueError):
                 pass
+        try:
+            if lower_limit is not None:
+                lower_limits.append(float(lower_limit))
+            if upper_limit is not None:
+                upper_limits.append(float(upper_limit))
+        except (TypeError, ValueError):
+            pass
 
         serialised_rows.append(
             {
@@ -160,9 +182,9 @@ def get_analytics(
                 "audit_date": r.audit_date.isoformat() if r.audit_date else None,
                 "measurements": measurements,
                 "judgement": r.judgement,
-                "nominal": (r.raw_ocr_json or {}).get("row_data", {}).get("nominal") if isinstance(r.raw_ocr_json, dict) else None,
-                "upper_limit": (r.raw_ocr_json or {}).get("row_data", {}).get("upper_limit") if isinstance(r.raw_ocr_json, dict) else None,
-                "lower_limit": (r.raw_ocr_json or {}).get("row_data", {}).get("lower_limit") if isinstance(r.raw_ocr_json, dict) else None,
+                "nominal": row_data.get("nominal"),
+                "upper_limit": upper_limit,
+                "lower_limit": lower_limit,
             }
         )
 
@@ -170,6 +192,7 @@ def get_analytics(
     ok_pct = round(ok_count / total * 100, 1) if total else 0
     nok_pct = round(nok_count / total * 100, 1) if total else 0
     avg_torque = round(sum(all_measurements) / len(all_measurements), 2) if all_measurements else None
+    cp, cpk = _capability_indices(all_measurements, lower_limits, upper_limits)
 
     return {
         "operation_number": operation_number,
@@ -182,8 +205,34 @@ def get_analytics(
             "ok_pct": ok_pct,
             "nok_pct": nok_pct,
             "avg_torque": avg_torque,
+            "cp": cp,
+            "cpk": cpk,
         },
     }
+
+
+def _capability_indices(
+    values: list[float],
+    lower_limits: list[float],
+    upper_limits: list[float],
+) -> tuple[float | None, float | None]:
+    if len(values) < 2 or not lower_limits or not upper_limits:
+        return None, None
+
+    lower = min(lower_limits)
+    upper = max(upper_limits)
+    if upper <= lower:
+        return None, None
+
+    mean = sum(values) / len(values)
+    variance = sum((value - mean) ** 2 for value in values) / (len(values) - 1)
+    sigma = math.sqrt(variance)
+    if sigma <= 0:
+        return None, None
+
+    cp = (upper - lower) / (6 * sigma)
+    cpk = min((upper - mean) / (3 * sigma), (mean - lower) / (3 * sigma))
+    return round(cp, 2), round(cpk, 2)
 
 
 def _dedupe_operation_rows(rows: list[ExtractedOperation]) -> list[ExtractedOperation]:

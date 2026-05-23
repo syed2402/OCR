@@ -1,4 +1,4 @@
-import { CheckCircle, XCircle, Hash, AlertTriangle, Gauge } from 'lucide-react'
+import { CheckCircle, XCircle, Hash, AlertTriangle, Gauge, Sigma } from 'lucide-react'
 import { AnalyticsStats } from '../api/client'
 
 interface Props {
@@ -24,24 +24,24 @@ const ACCENT = {
 function Card({ icon, value, label, sub, accent }: CardProps) {
   const c = ACCENT[accent]
   return (
-    <div className={`rounded-xl border ${c.border} ${c.bg} p-5 flex items-center gap-4`}>
-      <div className={`w-11 h-11 ${c.icon} rounded-xl flex items-center justify-center shrink-0`}>
+    <div className={`min-w-0 rounded-xl border ${c.border} ${c.bg} p-4 flex items-center gap-3`}>
+      <div className={`h-10 w-10 ${c.icon} rounded-xl flex items-center justify-center shrink-0`}>
         {icon}
       </div>
       <div className="min-w-0">
-        <p className={`text-2xl font-bold ${c.val} leading-tight`}>{value}</p>
-        <p className="text-sm text-gray-600 mt-0.5">{label}</p>
-        <p className="text-xs text-gray-400 mt-0.5">{sub}</p>
+        <p className={`truncate text-2xl font-bold ${c.val} leading-tight`}>{value}</p>
+        <p className="mt-0.5 break-words text-sm leading-snug text-gray-600">{label}</p>
+        <p className="mt-0.5 break-words text-xs leading-snug text-gray-400">{sub}</p>
       </div>
     </div>
   )
 }
 
 export default function OkNokSummary({ stats }: Props) {
-  const { total, ok_count, nok_count, ok_pct, nok_pct, avg_torque } = stats
+  const { total, ok_count, nok_count, ok_pct, nok_pct, avg_torque, cp, cpk } = stats
 
   return (
-    <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-7">
       <Card
         accent="blue"
         icon={<Hash className="text-blue-600" size={20} />}
@@ -67,7 +67,7 @@ export default function OkNokSummary({ stats }: Props) {
         accent="amber"
         icon={<AlertTriangle className="text-amber-600" size={20} />}
         value={String(nok_count)}
-        label="NG Count"
+        label="NOK Count"
         sub="failures detected"
       />
       <Card
@@ -76,6 +76,20 @@ export default function OkNokSummary({ stats }: Props) {
         value={avg_torque != null ? String(avg_torque) : '—'}
         label="Avg Torque"
         sub="across all measurements"
+      />
+      <Card
+        accent="blue"
+        icon={<Sigma className="text-blue-600" size={20} />}
+        value={cp != null ? String(cp) : '—'}
+        label="Cp"
+        sub="process capability"
+      />
+      <Card
+        accent="green"
+        icon={<Sigma className="text-green-600" size={20} />}
+        value={cpk != null ? String(cpk) : '—'}
+        label="Cpk"
+        sub="centered capability"
       />
     </div>
   )

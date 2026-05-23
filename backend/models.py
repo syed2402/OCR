@@ -25,7 +25,9 @@ class ExtractedOperation(Base):
     upload_id = Column(UUID(as_uuid=True), nullable=True)
     audit_date = Column(Date, nullable=True)
     operation_number = Column(String(50))
+    engine_number = Column(String(50))
     process_name = Column(Text)
+    quantity = Column(Integer)
     judgement = Column(String(10))
     measurements_json = Column(JSONB)   # e.g. [33, 33, 33, 33]
     raw_ocr_json = Column(JSONB)        # verbatim Gemini response

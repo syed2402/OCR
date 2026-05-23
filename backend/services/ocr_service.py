@@ -28,12 +28,16 @@ MAX_IMAGE_PX = 4096
 _EXTRACTION_PROMPT = """Extract ALL data rows from this Stellantis TORQUE AUDIT SHEET.
 
 CRITICAL: Extract EVERY measurement value. Missing measurements = FAILURE.
+CRITICAL: Keep each measurement row attached to the operation code printed on the SAME horizontal band. Never shift values to the next operation code.
 
 Return ONLY a minified JSON array. Use this compact schema per row:
-{"op":"1070","engine_number":"105925","process":"MB Cap removal & PCN","nominal":20,"upper_limit":30,"lower_limit":20,"measurements":[21.20,18.20,19.40],"judgement":"OK","date":"2026-05-05","confidence":{"op":0.95,"engine_number":0.92,"process":0.90,"measurements":[0.88,0.82,0.91],"judgement":0.92,"date":0.96},"unclear":[]}
+{"op":"1070","engine_number":"105925","process":"MB Cap removal & PCN","quantity":3,"nominal":20,"upper_limit":30,"lower_limit":20,"measurements":[21.20,18.20,19.40],"judgement":"OK","date":"2026-05-05","confidence":{"op":0.95,"engine_number":0.92,"process":0.90,"quantity":0.92,"measurements":[0.88,0.82,0.91],"judgement":0.92,"date":0.96},"unclear":[]}
 
 RULES:
 1. op: 4 digits. Fix OCR errors: O->0, l->1, I->1, S->5, Z->2, B->8
+   - The operation code is in the far-left column.
+   - It may span multiple visual sub-rows. All actual values inside that vertical span belong to that same op.
+   - Do NOT assign continuation values to the next visible operation code below.
 2. engine_number: extract the handwritten/stamped engine number from the row if visible. Use null if not visible.
 3. nominal, upper_limit, lower_limit: extract printed specification/tolerance values for the row from the PDF if visible.
    - If the sheet shows a target/nominal torque, return it as nominal.
@@ -41,23 +45,33 @@ RULES:
    - If the sheet shows tolerance values around nominal, convert them to final lower/upper limits when possible.
    - Example: nominal 20 with +10/-0 tolerance means lower_limit=20 and upper_limit=30.
    - Use null when not visible.
-4. measurements: extract ONLY handwritten numeric values in the Actual/measurement columns.
+4. quantity: extract the row quantity / sample count from the PDF if visible. It is the expected number of machine values for that row. Use null when not visible.
+5. measurements: extract ONLY handwritten numeric machine values in the Actual/measurement columns.
    - Preserve decimal points exactly. Examples: read 21.20 as 21.20, 18.20 as 18.20, 19.40 as 19.40.
    - Do NOT round decimals to whole numbers.
    - Do NOT split one decimal value into multiple values.
+   - Never return text in measurements; every measurement must be a JSON number.
    - Do NOT repeat values to fill table cells.
    - Ignore blank cells, crossed/X cells, printed tolerance text, and printed equipment ranges.
+   - If quantity is more than the visible Actual columns in one printed line, continue reading the wrapped/next visual line for the same operation row.
+   - Do not create a separate JSON row for continuation values; append them to the same measurements array.
+   - Example: if op 1250 visually spans four sub-rows, all numbers in those four sub-rows belong to op 1250, even if op 1290 appears below.
+   - Do NOT move 1250 continuation values into the 1290 row.
+   - Before returning JSON, cross-check every measurements array against the left operation-code column.
    - Scan left-to-right across the row and return only the visible handwritten measurement entries.
    - If a row has 3 handwritten measurements, return 3 values, not 6.
+   - If quantity is 8, return exactly 8 measurement values when all 8 are visible, even if they wrap to a second visual line.
+   - If quantity is 3, return exactly 3 measurement values when all 3 are visible.
    - If handwriting is unclear, do not guess. Omit that value and add "measurements" to unclear.
    - Prefer an incomplete measurements array over a guessed wrong number.
-5. judgement: OK/NOK/DK/HT/NA. Normalize Pass->OK, Fail->NOK, NG->NOK
-6. date: From header, format YYYY-MM-DD. Use null if unclear.
-7. confidence: numeric 0-1 confidence for every extracted value.
+6. judgement: OK/NOK/DK/HT/NA. Normalize Pass->OK, Fail->NOK, NG->NOK
+7. date: From header, format YYYY-MM-DD. Use null if unclear.
+8. confidence: numeric 0-1 confidence for every extracted value.
    - op/process/judgement/date are single numbers.
+   - quantity is a single number.
    - measurements must be an array with one confidence score per measurement value.
    - Use 0.90-1.00 only when clearly readable, 0.70-0.89 for mostly readable, below 0.70 when uncertain.
-8. unclear: array of field names you could not read confidently, for example ["measurements"].
+9. unclear: array of field names you could not read confidently, for example ["measurements"].
 
 Return ONLY valid JSON array. No markdown. No explanation.
 Empty result: []"""
@@ -217,6 +231,7 @@ def _normalise_confidence(raw: dict, measurement_count: int, unclear_fields: lis
         "operation_number": field_score("operation_number", "op"),
         "engine_number": field_score("engine_number"),
         "process_name": field_score("process_name", "process", "process_description"),
+        "quantity": field_score("quantity", "qty", "sample_count"),
         "measurements": measurement_scores,
         "judgement": field_score("judgement"),
         "audit_date": field_score("audit_date", "date"),
@@ -241,6 +256,9 @@ def _normalise_row(raw: dict, audit_date: Optional[str]) -> dict:
     op = op.replace("O", "0").replace("l", "1").replace("I", "1")
     op = re.sub(r"[^\d]", "", op)
 
+    quantity = _number_or_none(raw.get("quantity") or raw.get("qty") or raw.get("sample_count"))
+    quantity = int(quantity) if quantity is not None else None
+
     meas = raw.get("measurements") or raw.get("meas")
     if not isinstance(meas, list):
         meas = [meas] if meas is not None else []
@@ -255,8 +273,8 @@ def _normalise_row(raw: dict, audit_date: Optional[str]) -> dict:
                 found = re.findall(r"\d+(?:[.,]\d+)?", m)
                 if found:
                     cleaned.extend(float(x.replace(",", ".")) for x in found)
-                else:
-                    cleaned.append(m.strip())
+    if quantity is not None:
+        cleaned = cleaned[:max(0, quantity)]
 
     raw_j = str(raw.get("judgement") or "").lower().strip()
     unclear_fields = raw.get("unclear_fields") or raw.get("unclear") or []
@@ -264,6 +282,7 @@ def _normalise_row(raw: dict, audit_date: Optional[str]) -> dict:
         "operation_number": op or None,
         "engine_number": raw.get("engine_number"),
         "process_description": raw.get("process_description") or raw.get("process_name") or raw.get("process") or "",
+        "quantity": quantity,
         "nominal": _number_or_none(raw.get("nominal") or raw.get("target") or raw.get("spec")),
         "upper_limit": _number_or_none(raw.get("upper_limit") or raw.get("upper") or raw.get("max")),
         "lower_limit": _number_or_none(raw.get("lower_limit") or raw.get("lower") or raw.get("min")),
@@ -276,12 +295,49 @@ def _normalise_row(raw: dict, audit_date: Optional[str]) -> dict:
     }
 
 
+def _merge_continuation_rows(rows: list[dict]) -> list[dict]:
+    merged: list[dict] = []
+    current: dict | None = None
+
+    for row in rows:
+        op = str(row.get("operation_number") or "").strip()
+        measurements = row.get("measurements") or []
+
+        if op:
+            current = row
+            merged.append(row)
+        elif current is not None and measurements:
+            current_measurements = current.setdefault("measurements", [])
+            current_measurements.extend(measurements)
+
+            current_scores = current.setdefault("confidence_scores", {})
+            row_scores = row.get("confidence_scores") or {}
+            current_measurement_scores = current_scores.setdefault("measurements", [])
+            current_measurement_scores.extend(row_scores.get("measurements") or [])
+
+            current_unclear = set(current.get("unclear_fields") or [])
+            current_unclear.update(row.get("unclear_fields") or [])
+            current["unclear_fields"] = sorted(current_unclear)
+
+            current_quantity = current.get("quantity")
+            if current_quantity is None or current_quantity < len(current_measurements):
+                current["quantity"] = len(current_measurements)
+
+    for row in merged:
+        measurements = row.get("measurements") or []
+        quantity = row.get("quantity")
+        if quantity is None or quantity < len(measurements):
+            row["quantity"] = len(measurements) if measurements else quantity
+
+    return merged
+
+
 def extract_page(image_path: str, audit_date: Optional[str] = None) -> list[dict]:
     logger.info("extract_page: %s", image_path)
     pil_image = Image.open(image_path).convert("RGB")
     raw = _call_gemini(_EXTRACTION_PROMPT, pil_image)
     items = parse_gemini_response(raw)
-    rows = [_normalise_row(r, audit_date) for r in items]
+    rows = _merge_continuation_rows([_normalise_row(r, audit_date) for r in items])
 
     for i, row in enumerate(rows):
         meas_count = len(row.get("measurements", []))
@@ -332,6 +388,7 @@ def extract_from_image(image_path: str) -> dict:
             "operation_number": op,
             "engine_number": r.get("engine_number"),
             "process_name": r.get("process_description") or "",
+            "quantity": r.get("quantity"),
             "nominal": r.get("nominal"),
             "upper_limit": r.get("upper_limit"),
             "lower_limit": r.get("lower_limit"),

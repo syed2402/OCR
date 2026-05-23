@@ -11,12 +11,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+BACKEND_DIR = Path(__file__).resolve().parent
+ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
+load_dotenv(ENV_PATH, override=True)
+
 from database import init_db
 from routers import analytics, review, upload
 from services.pdf_processor import resolve_poppler_path
-
-ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
-load_dotenv(ENV_PATH, override=True)
 
 # Add poppler to process PATH so pdf2image can find pdfinfo + pdftoppm
 # regardless of which thread calls it.
@@ -58,10 +59,19 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 # Static file serving — row images rendered during OCR
 # ---------------------------------------------------------------------------
-STATIC_ROOT = Path(os.getenv("ROW_IMAGES_DIR", "static/row_images")).resolve().parent
+def _backend_path(env_name: str, default: str) -> Path:
+    path = Path(os.getenv(env_name, default))
+    if not path.is_absolute():
+        path = BACKEND_DIR / path
+    return path.resolve()
+
+
+ROW_IMAGES_DIR = _backend_path("ROW_IMAGES_DIR", "static/row_images")
+UPLOAD_DIR = _backend_path("UPLOAD_DIR", "static/uploads")
+STATIC_ROOT = ROW_IMAGES_DIR.parent
 STATIC_ROOT.mkdir(parents=True, exist_ok=True)
-Path(os.getenv("ROW_IMAGES_DIR", "static/row_images")).resolve().mkdir(parents=True, exist_ok=True)
-Path(os.getenv("UPLOAD_DIR", "static/uploads")).resolve().mkdir(parents=True, exist_ok=True)
+ROW_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 app.mount("/static", StaticFiles(directory=str(STATIC_ROOT)), name="static")
 

@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 from sqlalchemy import create_engine
+from sqlalchemy import text
 from sqlalchemy.orm import declarative_base, sessionmaker
 from dotenv import load_dotenv
 
@@ -29,3 +30,6 @@ def init_db():
     """Create all tables defined in models. Call at startup."""
     from models import Base as ModelBase  # noqa: F401 — ensures models are registered
     ModelBase.metadata.create_all(bind=engine)
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE extracted_operations ADD COLUMN IF NOT EXISTS quantity INTEGER"))
+        conn.execute(text("ALTER TABLE extracted_operations ADD COLUMN IF NOT EXISTS engine_number VARCHAR(50)"))

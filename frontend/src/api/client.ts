@@ -47,6 +47,7 @@ export interface ExtractedRow {
   operation_number: string | null
   engine_number: string | null
   process_name: string | null
+  quantity: number | null
   judgement: string | null
   measurements: number[]
   corrected: object | null
@@ -63,6 +64,7 @@ export interface ExtractedRow {
     operation_number?: number
     engine_number?: number
     process_name?: number
+    quantity?: number
     audit_date?: number
     judgement?: number
     measurements?: number[]
@@ -95,6 +97,8 @@ export interface AnalyticsStats {
   ok_pct: number
   nok_pct: number
   avg_torque: number | null
+  cp: number | null
+  cpk: number | null
 }
 
 export interface AnalyticsResponse {
@@ -106,7 +110,9 @@ export interface AnalyticsResponse {
 
 export interface ReviewPayload {
   operation_number?: string
+  engine_number?: string
   process_name?: string
+  quantity?: number
   audit_date?: string
   measurements?: number[]
   judgement?: string

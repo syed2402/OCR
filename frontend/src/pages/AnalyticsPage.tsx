@@ -143,7 +143,7 @@ export default function AnalyticsPage() {
                 </p>
                 {op.nok_count > 0 && (
                   <span className="text-xs font-semibold bg-red-100 text-red-700 px-1.5 py-0.5 rounded-full shrink-0">
-                    {op.nok_count} NG
+                    {op.nok_count} NOK
                   </span>
                 )}
               </div>

@@ -32,10 +32,41 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # Resolve to absolute paths so cv2.imread works regardless of thread CWD
-UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "static/uploads")).resolve()
-ROW_IMAGES_DIR = Path(os.getenv("ROW_IMAGES_DIR", "static/row_images")).resolve()
+BACKEND_DIR = Path(__file__).resolve().parents[1]
 ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
+
+
+def _backend_path(env_name: str, default: str) -> Path:
+    path = Path(os.getenv(env_name, default))
+    if not path.is_absolute():
+        path = BACKEND_DIR / path
+    return path.resolve()
+
+
+UPLOAD_DIR = _backend_path("UPLOAD_DIR", "static/uploads")
+ROW_IMAGES_DIR = _backend_path("ROW_IMAGES_DIR", "static/row_images")
 STALE_STARTUP_MINUTES = 5
+
+
+def _quantity_from_row_data(row_data: dict) -> int | None:
+    value = row_data.get("quantity") or row_data.get("qty")
+    if value is None:
+        return None
+    try:
+        quantity = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    return max(0, quantity)
+
+
+def _machine_values_for_quantity(row_data: dict, quantity: int | None) -> list[float]:
+    values = []
+    for value in row_data.get("measurements") or []:
+        try:
+            values.append(float(value))
+        except (TypeError, ValueError):
+            logger.warning("Dropping non-numeric machine value for op %s: %r", row_data.get("operation_number"), value)
+    return values
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +162,8 @@ def _process_upload(upload_id: str, pdf_path: str, db_url: str) -> None:
                 last_known_date = page_date
 
             for row_data in page_rows:
+                quantity = _quantity_from_row_data(row_data)
+                measurements = _machine_values_for_quantity(row_data, quantity)
                 audit_date = None
                 raw_date = row_data.get("audit_date") or last_known_date
                 if raw_date:
@@ -143,9 +176,11 @@ def _process_upload(upload_id: str, pdf_path: str, db_url: str) -> None:
                     upload_id=upload_id,
                     audit_date=audit_date,
                     operation_number=row_data.get("operation_number"),
+                    engine_number=row_data.get("engine_number"),
                     process_name=row_data.get("process_name"),
                     judgement=row_data.get("judgement"),
-                    measurements_json=row_data.get("measurements") or [],
+                    quantity=quantity,
+                    measurements_json=measurements,
                     raw_ocr_json={
                         "page": page_num,
                         "raw_response": result.get("raw_response", "")[:4000],
@@ -400,6 +435,8 @@ def _retry_page_background(upload_id: str, page_num: int, image_path: str, db_ur
 
         rows_added = 0
         for row_data in retry_rows:
+            quantity = _quantity_from_row_data(row_data)
+            measurements = _machine_values_for_quantity(row_data, quantity)
             audit_date = None
             raw_date = row_data.get("audit_date") or page_date
             if raw_date:
@@ -412,9 +449,11 @@ def _retry_page_background(upload_id: str, page_num: int, image_path: str, db_ur
                 upload_id=upload_id,
                 audit_date=audit_date,
                 operation_number=row_data.get("operation_number"),
+                engine_number=row_data.get("engine_number"),
                 process_name=row_data.get("process_name"),
                 judgement=row_data.get("judgement"),
-                measurements_json=row_data.get("measurements") or [],
+                quantity=quantity,
+                measurements_json=measurements,
                 raw_ocr_json={
                     "page": page_num,
                     "raw_response": result.get("raw_response", "")[:4000],
