@@ -4,6 +4,7 @@ import { Upload, ClipboardCheck, BarChart2, PanelLeftClose, PanelLeftOpen, LockK
 import UploadPage from './pages/UploadPage'
 import ReviewPage from './pages/ReviewPage'
 import AnalyticsPage from './pages/AnalyticsPage'
+import stellantisLogo from './assets/stellantis-logo.svg.jpeg'
 
 function NavItem({
   to,
@@ -55,12 +56,13 @@ function Sidebar() {
       <div className={`hidden border-b border-blue-800 md:block ${collapsed ? 'px-3 py-4' : 'px-5 py-5'}`}>
         <div className="flex items-center justify-between gap-2">
           <div className={`min-w-0 transition-opacity duration-200 ${collapsed ? 'opacity-0 pointer-events-none w-0 overflow-hidden' : 'opacity-100'}`}>
-            <p className="text-xs font-semibold text-blue-400 uppercase tracking-widest mb-1">
-              Stellantis
-            </p>
-            <h1 className="text-white font-bold text-base leading-tight">
-              Quality Analytics
-            </h1>
+            <div className="rounded bg-white px-3 py-2">
+              <img
+                src={stellantisLogo}
+                alt="Stellantis"
+                className="h-9 w-full object-contain"
+              />
+            </div>
           </div>
           <button
             className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-blue-100 hover:bg-blue-800 hover:text-white"

@@ -964,6 +964,10 @@ export default function ReviewPage() {
     const data = params.data
     if (!data) return ''
     const classes = []
+    const next = params.api.getDisplayedRowAtIndex((params.node.rowIndex ?? 0) + 1)?.data
+    const previous = params.api.getDisplayedRowAtIndex((params.node.rowIndex ?? 0) - 1)?.data
+    if (!previous || previous.id !== data.id) classes.push('review-grid-group-start')
+    if (!next || next.id !== data.id) classes.push('review-grid-group-end')
     if (data.id === row?.id) classes.push('review-grid-selected')
     if (data.review_status === 'APPROVED') classes.push('review-grid-approved')
     if (data.review_status === 'REJECTED') classes.push('review-grid-rejected')
@@ -1197,6 +1201,12 @@ export default function ReviewPage() {
             .review-sheet .ag-header-cell:last-child,
             .review-sheet .ag-cell:last-child {
               border-right: 0 !important;
+            }
+            .review-sheet .review-grid-group-start .ag-cell {
+              border-top: 1px solid #94a3b8 !important;
+            }
+            .review-sheet .review-grid-group-end .ag-cell {
+              border-bottom: 1px solid #94a3b8 !important;
             }
             .review-sheet .review-grid-selected .ag-cell {
               box-shadow: inset 0 0 0 1px #2563eb;
