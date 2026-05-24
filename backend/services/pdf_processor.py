@@ -18,12 +18,21 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-# Sharp enough for handwritten audit sheets. Very large iPhone/scan PDFs are
-# capped dynamically so Poppler does not try to create huge 9000px+ page images.
-DEFAULT_RENDER_DPI = 300
-MIN_RENDER_DPI = 120
-MAX_RENDER_LONG_EDGE_PX = 3800
-PAGE_RENDER_TIMEOUT_SECONDS = 90
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+# Sharp enough for handwritten audit sheets. Hosted CPUs such as Render can be
+# slow at rasterizing very large PDF pages, so these defaults favor reliability
+# over ultra-high resolution. They can be raised with env vars when needed.
+DEFAULT_RENDER_DPI = _int_env("PDF_RENDER_DPI", 180)
+MIN_RENDER_DPI = _int_env("PDF_MIN_RENDER_DPI", 72)
+MAX_RENDER_LONG_EDGE_PX = _int_env("PDF_MAX_RENDER_LONG_EDGE_PX", 2600)
+PAGE_RENDER_TIMEOUT_SECONDS = _int_env("PDF_RENDER_TIMEOUT_SECONDS", 300)
+FALLBACK_RENDER_DPIS = [96, 72]
 
 
 def resolve_poppler_path(poppler_path: Optional[str] = None) -> Optional[str]:
@@ -107,26 +116,44 @@ def pdf_to_images(
 
     image_paths: list[str] = []
     for page_num in range(1, page_count + 1):
-        kwargs: dict = {
-            "pdf_path": pdf_path,
-            "dpi": render_dpi,
-            "fmt": "png",
-            "first_page": page_num,
-            "last_page": page_num,
-            "thread_count": 1,
-            "timeout": PAGE_RENDER_TIMEOUT_SECONDS,
-        }
-        if poppler_path:
-            kwargs["poppler_path"] = poppler_path
+        pages: list[Image.Image] = []
+        attempted_dpis: list[int] = []
+        last_timeout: PDFPopplerTimeoutError | None = None
+        for dpi in [render_dpi, *FALLBACK_RENDER_DPIS]:
+            if dpi in attempted_dpis or dpi > render_dpi:
+                continue
+            attempted_dpis.append(dpi)
+            kwargs: dict = {
+                "pdf_path": pdf_path,
+                "dpi": dpi,
+                "fmt": "png",
+                "first_page": page_num,
+                "last_page": page_num,
+                "thread_count": 1,
+                "timeout": PAGE_RENDER_TIMEOUT_SECONDS,
+            }
+            if poppler_path:
+                kwargs["poppler_path"] = poppler_path
 
-        logger.info("Rendering page %d/%d", page_num, page_count)
-        try:
-            pages: list[Image.Image] = convert_from_path(**kwargs)
-        except PDFPopplerTimeoutError as exc:
+            logger.info("Rendering page %d/%d at %d DPI", page_num, page_count, dpi)
+            try:
+                pages = convert_from_path(**kwargs)
+                break
+            except PDFPopplerTimeoutError as exc:
+                last_timeout = exc
+                logger.warning(
+                    "PDF page %d timed out after %d seconds at %d DPI; trying lower DPI if available.",
+                    page_num,
+                    PAGE_RENDER_TIMEOUT_SECONDS,
+                    dpi,
+                )
+
+        if not pages and last_timeout is not None:
+            attempted = ", ".join(f"{dpi} DPI" for dpi in attempted_dpis)
             raise RuntimeError(
                 f"PDF page {page_num} took longer than "
-                f"{PAGE_RENDER_TIMEOUT_SECONDS} seconds to render."
-            ) from exc
+                f"{PAGE_RENDER_TIMEOUT_SECONDS} seconds to render at {attempted}."
+            ) from last_timeout
 
         if not pages:
             raise RuntimeError(f"PDF page {page_num} did not render to an image.")
