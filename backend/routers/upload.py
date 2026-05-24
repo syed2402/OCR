@@ -5,14 +5,13 @@ Flow:
   1. Client POSTs a PDF file.
   2. We save it, create an Upload record (status=PROCESSING), and return the
      upload_id immediately so the client can start polling.
-  3. A background thread runs the full pipeline:
+  3. A background task runs the full pipeline:
         PDF → page images → preprocessing → Gemini OCR → DB rows (EXTRACTED)
   4. Client polls /uploads/{upload_id}/status until status=COMPLETED|FAILED.
 """
 
 import logging
 import os
-import threading
 import time
 import uuid
 from datetime import date, datetime, timedelta
@@ -75,16 +74,16 @@ def _machine_values_for_quantity(row_data: dict, quantity: int | None) -> list[f
 
 def _process_upload(upload_id: str, pdf_path: str, db_url: str) -> None:
     """
-    Runs in a background thread:
+    Runs in a background task:
       PDF → images → preprocess → OCR → insert rows → mark upload COMPLETED.
     """
-    # Re-load .env inside the thread to guarantee all env vars are available
+    # Re-load .env inside the background task to guarantee all env vars are available
     from dotenv import load_dotenv
     load_dotenv(ENV_PATH, override=True)
 
-    # Ensure poppler is in PATH for this thread's subprocess calls
+    # Ensure poppler is in PATH for subprocess calls
     _pp = resolve_poppler_path()
-    logger.info("Background thread POPPLER_PATH: %s", _pp)
+    logger.info("Upload background task POPPLER_PATH: %s", _pp)
 
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
@@ -279,12 +278,7 @@ async def upload_pdf(
         "DATABASE_URL",
         "postgresql://quality_user:quality_pass@localhost:5432/stellantis_quality",
     )
-    thread = threading.Thread(
-        target=_process_upload,
-        args=(upload_id, str(pdf_path), db_url),
-        daemon=True,
-    )
-    thread.start()
+    background_tasks.add_task(_process_upload, upload_id, str(pdf_path), db_url)
 
     return {
         "status": "success",
@@ -540,12 +534,7 @@ def retry_page(
         "DATABASE_URL",
         "postgresql://quality_user:quality_pass@localhost:5432/stellantis_quality",
     )
-    thread = threading.Thread(
-        target=_retry_page_background,
-        args=(upload_id, page_num, str(img_path), db_url),
-        daemon=True,
-    )
-    thread.start()
+    background_tasks.add_task(_retry_page_background, upload_id, page_num, str(img_path), db_url)
 
     return {"status": "retrying", "upload_id": upload_id, "page": page_num}
 
