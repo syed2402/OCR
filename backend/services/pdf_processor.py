@@ -25,14 +25,15 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
-# Sharp enough for handwritten audit sheets. Hosted CPUs such as Render can be
-# slow at rasterizing very large PDF pages, so these defaults favor reliability
-# over ultra-high resolution. They can be raised with env vars when needed.
-DEFAULT_RENDER_DPI = _int_env("PDF_RENDER_DPI", 180)
+# Hosted CPUs such as Render can be slow at rasterizing very large PDF pages.
+# These defaults intentionally favor completing the upload over high resolution;
+# the OCR stage can still work with these page images, and env vars can raise
+# quality later on larger instances.
+DEFAULT_RENDER_DPI = _int_env("PDF_RENDER_DPI", 96)
 MIN_RENDER_DPI = _int_env("PDF_MIN_RENDER_DPI", 72)
-MAX_RENDER_LONG_EDGE_PX = _int_env("PDF_MAX_RENDER_LONG_EDGE_PX", 2600)
-PAGE_RENDER_TIMEOUT_SECONDS = _int_env("PDF_RENDER_TIMEOUT_SECONDS", 300)
-FALLBACK_RENDER_DPIS = [96, 72]
+MAX_RENDER_LONG_EDGE_PX = _int_env("PDF_MAX_RENDER_LONG_EDGE_PX", 1600)
+PAGE_RENDER_TIMEOUT_SECONDS = max(300, _int_env("PDF_RENDER_TIMEOUT_SECONDS", 300))
+FALLBACK_RENDER_DPIS = [72, 50]
 
 
 def resolve_poppler_path(poppler_path: Optional[str] = None) -> Optional[str]:
@@ -131,6 +132,8 @@ def pdf_to_images(
                 "last_page": page_num,
                 "thread_count": 1,
                 "timeout": PAGE_RENDER_TIMEOUT_SECONDS,
+                "use_pdftocairo": True,
+                "grayscale": True,
             }
             if poppler_path:
                 kwargs["poppler_path"] = poppler_path
