@@ -25,15 +25,13 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
-# Hosted CPUs such as Render can be slow at rasterizing very large PDF pages.
-# These defaults intentionally favor completing the upload over high resolution;
-# the OCR stage can still work with these page images, and env vars can raise
-# quality later on larger instances.
-DEFAULT_RENDER_DPI = _int_env("PDF_RENDER_DPI", 96)
-MIN_RENDER_DPI = _int_env("PDF_MIN_RENDER_DPI", 72)
-MAX_RENDER_LONG_EDGE_PX = _int_env("PDF_MAX_RENDER_LONG_EDGE_PX", 1600)
+# Hosted CPUs such as Render can be slow at rasterizing very large PDF pages,
+# but OCR accuracy drops sharply below ~120 DPI on these audit sheets.
+DEFAULT_RENDER_DPI = _int_env("PDF_RENDER_DPI", 300)
+MIN_RENDER_DPI = _int_env("PDF_MIN_RENDER_DPI", 120)
+MAX_RENDER_LONG_EDGE_PX = _int_env("PDF_MAX_RENDER_LONG_EDGE_PX", 3800)
 PAGE_RENDER_TIMEOUT_SECONDS = max(300, _int_env("PDF_RENDER_TIMEOUT_SECONDS", 300))
-FALLBACK_RENDER_DPIS = [72, 50]
+FALLBACK_RENDER_DPIS = [120, 110, 96]
 
 
 def resolve_poppler_path(poppler_path: Optional[str] = None) -> Optional[str]:
@@ -133,7 +131,6 @@ def pdf_to_images(
                 "thread_count": 1,
                 "timeout": PAGE_RENDER_TIMEOUT_SECONDS,
                 "use_pdftocairo": True,
-                "grayscale": True,
             }
             if poppler_path:
                 kwargs["poppler_path"] = poppler_path
