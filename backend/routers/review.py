@@ -68,22 +68,21 @@ def _normalise_accuracy_scores(scores) -> dict:
 
 
 def _quantity_from_row(row: ExtractedOperation) -> int | None:
-    candidates: list[int] = []
     if row.quantity is not None:
-        candidates.append(row.quantity)
+        return row.quantity
     if isinstance(row.raw_ocr_json, dict):
         row_data = row.raw_ocr_json.get("row_data")
         if isinstance(row_data, dict):
             value = row_data.get("quantity") or row_data.get("qty")
             if value is not None:
                 try:
-                    candidates.append(int(value))
+                    return int(value)
                 except (TypeError, ValueError):
                     pass
     measurements = row.measurements_json or []
     if measurements:
-        candidates.append(len(_display_measurements(measurements, None)))
-    return max(candidates) if candidates else None
+        return len(_display_measurements(measurements, None))
+    return None
 
 
 def _validated_measurements(values, quantity: int | None, require_exact: bool = False) -> list[float]:
@@ -139,16 +138,46 @@ def _looks_like_continuation(row: ExtractedOperation) -> bool:
     return bool(_display_measurements(row.measurements_json, None))
 
 
+def _same_wrapped_quantity_row(current: ExtractedOperation, row: ExtractedOperation) -> bool:
+    if _row_page(current) != _row_page(row):
+        return False
+    if not _is_real_operation_number(row.operation_number):
+        return False
+    if str(row.operation_number).strip() != str(current.operation_number).strip():
+        return False
+    current_quantity = _quantity_from_row(current)
+    row_quantity = _quantity_from_row(row)
+    if current_quantity is None or row_quantity is None or current_quantity != row_quantity:
+        return False
+    if current_quantity <= 6:
+        return False
+    if (current.process_name or "").strip() != (row.process_name or "").strip():
+        return False
+    current_count = len(_display_measurements(current.measurements_json, None))
+    row_count = len(_display_measurements(row.measurements_json, None))
+    return current_count < current_quantity and current_count + row_count <= current_quantity
+
+
 def _repair_wrapped_rows(rows: list[ExtractedOperation], db: Session) -> None:
     changed = False
     current: ExtractedOperation | None = None
 
     for row in rows:
         if _is_real_operation_number(row.operation_number):
+            if current is not None and _same_wrapped_quantity_row(current, row):
+                merged = _display_measurements(current.measurements_json, None)
+                merged.extend(_display_measurements(row.measurements_json, None))
+                current.measurements_json = merged
+                if not current.engine_number and row.engine_number:
+                    current.engine_number = row.engine_number
+                db.delete(row)
+                changed = True
+                continue
+
             current = row
             measurements = _display_measurements(row.measurements_json, None)
             quantity = _quantity_from_row(row)
-            if measurements and (quantity is None or quantity < len(measurements)):
+            if measurements and quantity is None:
                 row.quantity = len(measurements)
                 changed = True
             continue
@@ -156,10 +185,21 @@ def _repair_wrapped_rows(rows: list[ExtractedOperation], db: Session) -> None:
         if current is None or _row_page(current) != _row_page(row) or not _looks_like_continuation(row):
             continue
 
+        if row.quantity is not None:
+            row.operation_number = current.operation_number
+            if not row.engine_number:
+                row.engine_number = current.engine_number
+            if not row.process_name:
+                row.process_name = current.process_name
+            current = row
+            changed = True
+            continue
+
         merged = _display_measurements(current.measurements_json, None)
         merged.extend(_display_measurements(row.measurements_json, None))
         current.measurements_json = merged
-        current.quantity = max(_quantity_from_row(current) or 0, len(merged))
+        if current.quantity is None:
+            current.quantity = len(merged)
 
         if not current.engine_number and row.engine_number:
             current.engine_number = row.engine_number
@@ -219,14 +259,15 @@ def _row_to_dict(row: ExtractedOperation) -> dict:
 
 @router.get("/uploads/{upload_id}/rows")
 def get_upload_rows(upload_id: str, db: Session = Depends(get_db)):
-    """Return all rows extracted from a given upload, ordered by page then insertion order."""
-    from sqlalchemy import text as _text, case
+    """Return all rows extracted from a given upload, ordered by page and operation."""
+    from sqlalchemy import text as _text
     rows = (
         db.query(ExtractedOperation)
         .filter(ExtractedOperation.upload_id == upload_id)
         .order_by(
             # Sort by page number first (stored in raw_ocr_json->>'page')
             _text("(raw_ocr_json->>'page')::int ASC NULLS LAST"),
+            _text("NULLIF(regexp_replace(operation_number, '\\D', '', 'g'), '')::int ASC NULLS LAST"),
             ExtractedOperation.id.asc(),
         )
         .all()
@@ -237,6 +278,7 @@ def get_upload_rows(upload_id: str, db: Session = Depends(get_db)):
         .filter(ExtractedOperation.upload_id == upload_id)
         .order_by(
             _text("(raw_ocr_json->>'page')::int ASC NULLS LAST"),
+            _text("NULLIF(regexp_replace(operation_number, '\\D', '', 'g'), '')::int ASC NULLS LAST"),
             ExtractedOperation.id.asc(),
         )
         .all()
@@ -262,8 +304,7 @@ def review_row(row_id: int, payload: ReviewRowPayload, db: Session = Depends(get
     if not row:
         raise HTTPException(status_code=404, detail="Row not found")
 
-    if row.review_status == "APPROVED":
-        raise HTTPException(status_code=409, detail="Row is already approved; unapprove before editing.")
+    was_approved = row.review_status == "APPROVED"
 
     # Apply corrections
     if payload.operation_number is not None:
@@ -297,7 +338,7 @@ def review_row(row_id: int, payload: ReviewRowPayload, db: Session = Depends(get
         "judgement": row.judgement,
         "audit_date": row.audit_date.isoformat() if row.audit_date else None,
     }
-    row.review_status = "REVIEWED"
+    row.review_status = "APPROVED" if was_approved else "REVIEWED"
     row.reviewed_at = datetime.utcnow()
     db.commit()
     db.refresh(row)

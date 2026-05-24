@@ -100,11 +100,17 @@ def _process_upload(upload_id: str, pdf_path: str, db_url: str) -> None:
             return
 
         # Step 1 — PDF → page images (pass poppler_path explicitly)
+        def mark_page_rendered(page_num: int, _image_path: str) -> None:
+            upload.processed_pages = max(upload.processed_pages or 0, page_num)
+            upload.error_message = f"Rendered page {page_num}; OCR will start after page extraction."
+            db.commit()
+
         image_paths = pdf_to_images(
             pdf_path=pdf_path,
             output_dir=str(ROW_IMAGES_DIR),
             upload_id=upload_id,
             poppler_path=_pp or None,
+            on_page_saved=mark_page_rendered,
         )
 
         total_rows = 0
@@ -113,6 +119,8 @@ def _process_upload(upload_id: str, pdf_path: str, db_url: str) -> None:
 
         # Process pages sequentially to avoid rate limits
         for page_num, image_path in enumerate(image_paths, start=1):
+            upload.error_message = f"Running OCR on page {page_num}/{len(image_paths)}."
+            db.commit()
             logger.info("=" * 70)
             logger.info("PROCESSING PAGE %d/%d: %s", page_num, len(image_paths), image_path)
             logger.info("=" * 70)

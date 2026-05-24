@@ -41,7 +41,9 @@ import {
   BarChart2,
   Download,
   Columns3,
+  Eye,
   Loader2,
+  Pencil,
 } from 'lucide-react'
 import {
   approveRow,
@@ -136,7 +138,16 @@ function mergeWrappedRows(sourceRows: ExtractedRow[]) {
   sourceRows.forEach((row) => {
     if (isRealOperationNumber(row.operation_number)) {
       const measurements = row.measurements.filter((value) => Number.isFinite(Number(value)))
-      const quantity = Math.max(row.quantity ?? 0, measurements.length) || row.quantity
+      if (
+        current &&
+        (current.page ?? 1) === (row.page ?? 1) &&
+        String(current.operation_number).trim() === String(row.operation_number).trim()
+      ) {
+        current = { ...row, measurements }
+        merged.push(current)
+        return
+      }
+      const quantity = row.quantity ?? (measurements.length || null)
       current = { ...row, quantity, measurements }
       merged.push(current)
       return
@@ -147,12 +158,24 @@ function mergeWrappedRows(sourceRows: ExtractedRow[]) {
       return
     }
 
-    const measurements = [
-      ...current.measurements,
-      ...row.measurements.filter((value) => Number.isFinite(Number(value))),
-    ]
+    const rowMeasurements = row.measurements.filter((value) => Number.isFinite(Number(value)))
+    if (row.quantity !== null && row.quantity !== undefined) {
+      current = {
+        ...row,
+        operation_number: current.operation_number,
+        engine_number: row.engine_number ?? current.engine_number,
+        process_name: row.process_name ?? current.process_name,
+        measurements: rowMeasurements,
+      }
+      merged.push(current)
+      return
+    }
+
+    const measurements = [...current.measurements, ...rowMeasurements]
     current.measurements = measurements
-    current.quantity = Math.max(current.quantity ?? 0, row.quantity ?? 0, measurements.length)
+    if (current.quantity === null || current.quantity === undefined) {
+      current.quantity = measurements.length
+    }
   })
 
   return merged
@@ -168,33 +191,16 @@ function normalizeConfidence(value?: number | null) {
   return Math.max(0, Math.min(1, normalized))
 }
 
-function confidenceLabel(value?: number | null) {
-  const normalized = normalizeConfidence(value)
-  return normalized === null ? '-' : normalized.toFixed(2)
-}
-
-function confidenceDot(value?: number | null) {
+function confidenceToneClass(value?: number | null) {
   const normalized = normalizeConfidence(value)
   if (normalized === null) return ''
-  if (normalized >= 0.85) return 'bg-slate-950'
-  if (normalized >= 0.7) return 'bg-blue-600'
-  return 'bg-red-600'
-}
-
-function confidenceTextClass(value?: number | null) {
-  const normalized = normalizeConfidence(value)
-  if (normalized === null) return 'text-slate-400'
-  if (normalized >= 0.85) return 'text-slate-950'
-  if (normalized >= 0.7) return 'text-blue-700'
+  if (normalized >= 0.95) return 'text-blue-800'
+  if (normalized >= 0.8) return 'text-blue-600'
   return 'text-red-700'
 }
 
 function confidenceValueClass(value?: number | null) {
-  const normalized = normalizeConfidence(value)
-  if (normalized === null) return ''
-  if (normalized >= 0.85) return 'text-slate-950'
-  if (normalized >= 0.7) return 'text-blue-700'
-  return 'text-red-700'
+  return confidenceToneClass(value)
 }
 
 // ---------------------------------------------------------------------------
@@ -329,8 +335,8 @@ export default function ReviewPage() {
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [approvingAll, setApprovingAll] = useState(false)
+  const [isEditMode, setIsEditMode] = useState(false)
   const [activeSheet, setActiveSheet] = useState<number | 'ALL'>('ALL')
-  const [expandedPage, setExpandedPage] = useState<number | null>(null)
   const [rowHeight, setRowHeight] = useState(34)
   const [sheetPanelPercent, setSheetPanelPercent] = useState(62)
   const [sheetZoom, setSheetZoom] = useState(100)
@@ -366,21 +372,41 @@ export default function ReviewPage() {
     return () => query.removeEventListener('change', sync)
   }, [])
 
+  useEffect(() => {
+    if (!isEditMode) gridApiRef.current?.stopEditing()
+  }, [isEditMode])
+
   // Load rows when uploadId is known — suspicious rows bubble to top
   useEffect(() => {
     if (!uploadId) return
-    setLoading(true)
-    getUploadRows(uploadId)
-      .then((data) => {
+    let cancelled = false
+
+    const loadRows = async (attempt = 1) => {
+      try {
+        const data = await getUploadRows(uploadId)
+        if (cancelled) return
         // Keep backend page order — rows already sorted by page then id
         setRows(data)
         setIdx(0)
         setActiveSheet('ALL')
-        setExpandedPage(null)
         setMeasurementColumnCount(DEFAULT_TORQUE_VALUE_COLUMNS)
-      })
-      .catch((e) => toast.error(`Failed to load rows: ${e.message}`))
-      .finally(() => setLoading(false))
+        setLoading(false)
+      } catch (e) {
+        if (cancelled) return
+        if (attempt < 3) {
+          window.setTimeout(() => loadRows(attempt + 1), attempt * 1200)
+          return
+        }
+        toast.error(`Failed to load rows: ${(e as Error).message}`)
+        setLoading(false)
+      }
+    }
+
+    setLoading(true)
+    loadRows()
+    return () => {
+      cancelled = true
+    }
   }, [uploadId])
 
   const row = rows[idx] ?? null
@@ -708,8 +734,9 @@ export default function ReviewPage() {
   }, [])
 
   const saveGridEdit = useCallback(async (event: CellValueChangedEvent<SheetRow>) => {
+    if (!isEditMode) return
     const edited = event.data
-    if (!edited || edited.review_status === 'APPROVED') return
+    if (!edited) return
 
     const field = String(event.colDef.field ?? '')
     const base = rows.find((r) => r.id === edited.id)
@@ -751,10 +778,10 @@ export default function ReviewPage() {
       setRows((prev) => prev.map((r) => (r.id === base.id ? base : r)))
       toast.error(e.message)
     }
-  }, [rows, selectRowById])
+  }, [isEditMode, rows, selectRowById])
 
   const columnDefs = useMemo<ColDef<SheetRow>[]>(() => {
-    const editable = ({ data }: { data?: SheetRow }) => data?.review_status !== 'APPROVED'
+    const editable = ({ data }: { data?: SheetRow }) => isEditMode && Boolean(data)
     const zoomWidth = (width: number) => Math.round(width * sheetZoom / 100)
     const displayedRows = (api: GridApi<SheetRow>) => {
       const visibleRows: SheetRow[] = []
@@ -770,7 +797,15 @@ export default function ReviewPage() {
       )
       return { index, visibleRows }
     }
-    const rowSpanForOperationGroup = (params: { api: GridApi<SheetRow>; data?: SheetRow }) => {
+    const sameOperationGroup = (left?: SheetRow, right?: SheetRow) =>
+      Boolean(
+        left &&
+        right &&
+        (left.page ?? 1) === (right.page ?? 1) &&
+        isRealOperationNumber(left.operation_number) &&
+        String(left.operation_number).trim() === String(right.operation_number).trim(),
+      )
+    const rowSpanForRecordGroup = (params: { api: GridApi<SheetRow>; data?: SheetRow }) => {
       if (!params.data?.id) return 1
 
       const { index, visibleRows } = findDisplayedRowIndex(params)
@@ -786,14 +821,33 @@ export default function ReviewPage() {
       }
       return span
     }
-    const isOperationGroupContinuation = (params: { api: GridApi<SheetRow>; data?: SheetRow }) => {
+    const isRecordGroupContinuation = (params: { api: GridApi<SheetRow>; data?: SheetRow }) => {
       if (!params.data?.id) return false
       const { index, visibleRows } = findDisplayedRowIndex(params)
       return index > 0 && visibleRows[index - 1]?.id === params.data.id
     }
-    const mergedCellStyle = (params: { api: GridApi<SheetRow>; data?: SheetRow }) => {
-      const span = rowSpanForOperationGroup(params)
-      if (isOperationGroupContinuation(params)) {
+    const rowSpanForOperationGroup = (params: { api: GridApi<SheetRow>; data?: SheetRow }) => {
+      if (!params.data || !isRealOperationNumber(params.data.operation_number)) return 1
+      const { index, visibleRows } = findDisplayedRowIndex(params)
+      if (index === -1 || sameOperationGroup(visibleRows[index - 1], params.data)) return 1
+      let span = 1
+      for (let i = index + 1; i < visibleRows.length; i++) {
+        if (!sameOperationGroup(params.data, visibleRows[i])) break
+        span++
+      }
+      return span
+    }
+    const isOperationGroupContinuation = (params: { api: GridApi<SheetRow>; data?: SheetRow }) => {
+      const { index, visibleRows } = findDisplayedRowIndex(params)
+      return index > 0 && sameOperationGroup(visibleRows[index - 1], params.data)
+    }
+    const mergedCellStyle = (
+      params: { api: GridApi<SheetRow>; data?: SheetRow },
+      spanGetter = rowSpanForOperationGroup,
+      continuationGetter = isOperationGroupContinuation,
+    ) => {
+      const span = spanGetter(params)
+      if (continuationGetter(params)) {
         return {
           alignItems: 'center',
           backgroundColor: '#fff',
@@ -820,8 +874,8 @@ export default function ReviewPage() {
       const value = normalizeConfidence(valueGetter(data))
       const classes = [baseClass]
       if (showConfidence && value !== null && value !== undefined) {
-        if (value < 0.7) classes.push('review-confidence-low')
-        else if (value < 0.85) classes.push('review-confidence-medium')
+        if (value < 0.8) classes.push('review-confidence-bad')
+        else classes.push('review-confidence-normal')
       }
       return classes.join(' ')
     }
@@ -830,16 +884,10 @@ export default function ReviewPage() {
       value?: number | null,
       align: 'left' | 'right' = 'left',
     ) => (
-      <div className="relative flex h-full items-center pb-3">
+      <div className="relative flex h-full items-center">
         <div className={`${align === 'right' ? 'w-full text-right' : 'w-full'} ${showConfidence ? confidenceValueClass(value) : ''}`}>
           {content}
         </div>
-        {showConfidence && value !== null && value !== undefined && (
-          <span className={`pointer-events-none absolute bottom-0 left-0 flex items-center gap-1 text-[10px] font-semibold leading-none ${confidenceTextClass(value)}`}>
-            <span className={`h-1.5 w-1.5 rounded-full ${confidenceDot(value)}`} />
-            {confidenceLabel(value)}
-          </span>
-        )}
       </div>
     )
     const measurementCols: ColDef<SheetRow>[] = Array.from({ length: measurementColumnCount }, (_, i) => ({
@@ -882,7 +930,7 @@ export default function ReviewPage() {
             ? null
             : withConfidence(params.value || '-', params.data?.confidence_scores?.operation_number),
         rowSpan: rowSpanForOperationGroup,
-        cellStyle: mergedCellStyle,
+        cellStyle: (params) => mergedCellStyle(params),
       },
       {
         headerName: 'Engine No',
@@ -895,7 +943,7 @@ export default function ReviewPage() {
             ? null
             : withConfidence(params.value || '-', params.data?.confidence_scores?.engine_number),
         rowSpan: rowSpanForOperationGroup,
-        cellStyle: mergedCellStyle,
+        cellStyle: (params) => mergedCellStyle(params),
       },
       {
         headerName: 'Qty',
@@ -906,7 +954,7 @@ export default function ReviewPage() {
         cellEditor: 'agNumberCellEditor',
         cellClass: confidenceCellClass('font-mono font-semibold text-right', (row) => row?.confidence_scores?.quantity),
         cellRenderer: (params: { api: GridApi<SheetRow>; data?: SheetRow; value?: number | null }) =>
-          isOperationGroupContinuation(params)
+          isRecordGroupContinuation(params)
             ? null
             : withConfidence(params.value ?? '-', params.data?.confidence_scores?.quantity, 'right'),
         valueParser: ({ newValue }) => {
@@ -914,8 +962,8 @@ export default function ReviewPage() {
           const value = Number(newValue)
           return Number.isFinite(value) ? Math.max(0, Math.floor(value)) : null
         },
-        rowSpan: rowSpanForOperationGroup,
-        cellStyle: mergedCellStyle,
+        rowSpan: rowSpanForRecordGroup,
+        cellStyle: (params) => mergedCellStyle(params, rowSpanForRecordGroup, isRecordGroupContinuation),
       },
       ...measurementCols,
       {
@@ -958,7 +1006,7 @@ export default function ReviewPage() {
         },
       },
     ]
-  }, [handleApproveById, measurementColumnCount, sheetZoom, showConfidence])
+  }, [handleApproveById, isEditMode, measurementColumnCount, sheetZoom, showConfidence])
 
   const getGridRowClass = useCallback((params: RowClassParams<SheetRow>) => {
     const data = params.data
@@ -982,6 +1030,7 @@ export default function ReviewPage() {
     (r) => r.review_status === 'EXTRACTED' || r.review_status === 'REVIEWED',
   ).length
   const imageTransform = `translate(${imagePan.x}px, ${imagePan.y}px) rotate(${imageRotation}deg) scale(${imageZoom / 100})`
+  const canEditCurrentRow = Boolean(isEditMode && row)
 
   if (!uploadId) {
     return <UploadSelector onSelect={setUploadId} />
@@ -1061,26 +1110,21 @@ export default function ReviewPage() {
         </div>
       </div>
 
-      {/* Collapsible page row navigator */}
+      {/* Page navigator */}
       <div className="shrink-0 overflow-x-auto border-b border-gray-200 bg-gray-50 px-4 py-2 sm:px-6">
         <div className="flex items-center gap-2">
           {pages.map((page) => {
-            const pageRows = rows
-              .map((r, i) => ({ row: r, index: i }))
-              .filter(({ row }) => (row.page ?? 1) === page)
-            const isExpanded = expandedPage === page
             const hasCurrentRow = currentPage === page
 
             return (
               <div key={page} className="flex items-center gap-1 shrink-0">
                 <button
                   onClick={() => {
-                    setExpandedPage((prev) => (prev === page ? null : page))
                     setActiveSheet(page)
                     jumpToPage(page)
                   }}
                   className={`h-7 rounded px-3 text-xs font-semibold transition-colors ${
-                    isExpanded || hasCurrentRow
+                    hasCurrentRow
                       ? 'bg-blue-600 text-white'
                       : 'bg-white text-slate-600 border border-slate-300 hover:bg-slate-100'
                   }`}
@@ -1089,30 +1133,6 @@ export default function ReviewPage() {
                 >
                   P{page}
                 </button>
-
-                {isExpanded && (
-                  <div className="flex items-center gap-1 rounded border border-slate-200 bg-white px-2 py-1">
-                    {pageRows.map(({ row: r, index: i }) => (
-                      <button
-                        key={r.id}
-                        onClick={() => setIdx(i)}
-                        title={`Row ${i + 1}: ${r.operation_number ?? '?'} (page ${r.page ?? 1})`}
-                        className={`h-5 w-5 rounded-sm transition-all ${
-                          i === idx ? 'ring-2 ring-blue-500 scale-110' : ''
-                        } ${
-                          r.review_status === 'APPROVED'
-                            ? 'bg-green-400'
-                            : r.review_status === 'REJECTED'
-                            ? 'bg-red-400'
-                            : r.review_status === 'REVIEWED'
-                            ? 'bg-yellow-400'
-                            : 'bg-gray-300'
-                        }`}
-                        type="button"
-                      />
-                    ))}
-                  </div>
-                )}
               </div>
             )
           })}
@@ -1134,6 +1154,28 @@ export default function ReviewPage() {
               All
             </button>
             <div className="flex shrink-0 flex-wrap items-center gap-2 sm:ml-auto sm:gap-3">
+              <div className="flex rounded border border-slate-200 bg-slate-100 p-0.5">
+                <button
+                  className={`flex items-center gap-1 rounded px-2.5 py-1 text-xs font-semibold transition-colors ${
+                    !isEditMode ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                  onClick={() => setIsEditMode(false)}
+                  type="button"
+                  title="View only"
+                >
+                  <Eye size={14} /> View
+                </button>
+                <button
+                  className={`flex items-center gap-1 rounded px-2.5 py-1 text-xs font-semibold transition-colors ${
+                    isEditMode ? 'bg-blue-600 text-white shadow-sm' : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                  onClick={() => setIsEditMode(true)}
+                  type="button"
+                  title="Allow editing values"
+                >
+                  <Pencil size={14} /> Editable
+                </button>
+              </div>
               <label className="flex items-center gap-2 rounded border border-slate-200 px-2 py-1 text-xs font-medium text-slate-600">
                 <input
                   type="checkbox"
@@ -1191,11 +1233,16 @@ export default function ReviewPage() {
               --ag-header-background-color: #f8fafc;
               --ag-header-foreground-color: #334155;
               --ag-border-color: #cbd5e1;
+              --ag-row-border-style: none;
               --ag-row-hover-color: #eef6ff;
               --ag-selected-row-background-color: #dbeafe;
             }
+            .review-sheet .ag-row {
+              border-bottom: 0 !important;
+            }
             .review-sheet .ag-header-cell,
             .review-sheet .ag-cell {
+              border-bottom: 1px solid #cbd5e1 !important;
               border-right: 1px solid #cbd5e1 !important;
             }
             .review-sheet .ag-header-cell:last-child,
@@ -1211,14 +1258,17 @@ export default function ReviewPage() {
             .review-sheet .review-grid-selected .ag-cell {
               box-shadow: inset 0 0 0 1px #2563eb;
             }
-            .review-sheet .ag-cell.review-confidence-low {
+            .review-sheet .ag-cell.review-confidence-bad {
               color: #b91c1c;
             }
-            .review-sheet .ag-cell.review-confidence-medium {
+            .review-sheet .ag-cell.review-confidence-normal {
               color: #1d4ed8;
             }
+            .review-sheet.review-sheet-view-only .ag-cell {
+              cursor: default;
+            }
           `}</style>
-          <div className="review-sheet ag-theme-quartz min-h-[360px] flex-1 lg:min-h-0">
+          <div className={`review-sheet ag-theme-quartz min-h-[360px] flex-1 lg:min-h-0 ${isEditMode ? '' : 'review-sheet-view-only'}`}>
             <AgGridReact<SheetRow>
               rowData={sheetRows}
               columnDefs={columnDefs}
@@ -1226,7 +1276,7 @@ export default function ReviewPage() {
                 resizable: true,
                 sortable: true,
                 filter: true,
-                editable: true,
+                editable: isEditMode,
                 suppressKeyboardEvent: ({ event }) => event.key === 'Enter' && saving,
               }}
               onGridReady={(event) => { gridApiRef.current = event.api }}
@@ -1238,6 +1288,8 @@ export default function ReviewPage() {
               rowSelection="multiple"
               rowHeight={rowHeight}
               headerHeight={38}
+              singleClickEdit={isEditMode}
+              suppressClickEdit={!isEditMode}
               animateRows
               suppressDragLeaveHidesColumns
               stopEditingWhenCellsLoseFocus
@@ -1276,6 +1328,7 @@ export default function ReviewPage() {
                 const rowFlags = isSuspicious(r)
                 const locked = r.review_status === 'APPROVED'
                 const rejected = r.review_status === 'REJECTED'
+                const canEditRow = isEditMode && selected && !locked
                 return (
                   <tr
                     key={r.id}
@@ -1295,7 +1348,7 @@ export default function ReviewPage() {
                       {i + 1}
                     </td>
                     <td className="border-r border-slate-200 px-2 py-2">
-                      {selected && !locked ? (
+                      {canEditRow ? (
                         <input
                           className={`w-full rounded border px-2 py-1 font-mono text-sm ${
                             flags.operation_number ? 'border-red-400 bg-red-50' : 'border-slate-300'
@@ -1311,7 +1364,7 @@ export default function ReviewPage() {
                       )}
                     </td>
                     <td className="border-r border-slate-200 px-2 py-2">
-                      {selected && !locked ? (
+                      {canEditRow ? (
                         <input
                           className={`w-full rounded border px-2 py-1 text-sm ${
                             flags.process_name ? 'border-red-400 bg-red-50' : 'border-slate-300'
@@ -1327,7 +1380,7 @@ export default function ReviewPage() {
                       )}
                     </td>
                     <td className="border-r border-slate-200 px-2 py-2">
-                      {selected && !locked ? (
+                      {canEditRow ? (
                         <input
                           type="date"
                           className={`w-full rounded border px-2 py-1 text-sm ${
@@ -1342,7 +1395,7 @@ export default function ReviewPage() {
                       )}
                     </td>
                     <td className="border-r border-slate-200 px-2 py-2">
-                      {selected && !locked ? (
+                      {canEditRow ? (
                         <div className="flex flex-wrap gap-1" onClick={(e) => e.stopPropagation()}>
                           {editMeasurements.map((val, mIdx) => (
                             <input
@@ -1371,7 +1424,7 @@ export default function ReviewPage() {
                       )}
                     </td>
                     <td className="border-r border-slate-200 px-2 py-2">
-                      {selected && !locked ? (
+                      {canEditRow ? (
                         <select
                           className="w-full rounded border border-slate-300 px-2 py-1 text-sm"
                           value={editJudgement}
@@ -1525,12 +1578,6 @@ export default function ReviewPage() {
             )}
           </div>
           <div className="flex flex-wrap items-center gap-3 border-t border-slate-300 bg-white px-4 py-3">
-            <button className="btn-secondary py-2 px-3" onClick={() => nav(-1)} disabled={idx === 0 || saving}>
-              <ChevronLeft size={16} />
-            </button>
-            <button className="btn-secondary py-2 px-3" onClick={() => nav(1)} disabled={idx === rows.length - 1 || saving}>
-              <ChevronRight size={16} />
-            </button>
             <div className="flex-1" />
             {row?.review_status !== 'APPROVED' && row?.review_status !== 'REJECTED' && (
               <>
@@ -1599,7 +1646,7 @@ export default function ReviewPage() {
                     value={editOpNum}
                     onChange={(e) => setEditOpNum(e.target.value)}
                     placeholder="e.g. 1140"
-                    disabled={row.review_status === 'APPROVED'}
+                    disabled={!canEditCurrentRow}
                   />
                 </div>
 
@@ -1616,7 +1663,7 @@ export default function ReviewPage() {
                     value={editProcName}
                     onChange={(e) => setEditProcName(e.target.value)}
                     placeholder="e.g. MB Cap tightening"
-                    disabled={row.review_status === 'APPROVED'}
+                    disabled={!canEditCurrentRow}
                   />
                 </div>
 
@@ -1633,7 +1680,7 @@ export default function ReviewPage() {
                     className={`input-field ${flags.audit_date ? 'input-error' : ''}`}
                     value={editDate}
                     onChange={(e) => setEditDate(e.target.value)}
-                    disabled={row.review_status === 'APPROVED'}
+                    disabled={!canEditCurrentRow}
                   />
                 </div>
 
@@ -1649,7 +1696,7 @@ export default function ReviewPage() {
                     className={`input-field ${flags.judgement ? 'input-error' : ''}`}
                     value={editJudgement}
                     onChange={(e) => setEditJudgement(e.target.value)}
-                    disabled={row.review_status === 'APPROVED'}
+                    disabled={!canEditCurrentRow}
                   >
                     <option value="">— select —</option>
                     <option value="OK">OK</option>
@@ -1666,7 +1713,7 @@ export default function ReviewPage() {
                         <span className="ml-2 text-red-500 text-xs">⚠ check values</span>
                       )}
                     </label>
-                    {row.review_status !== 'APPROVED' && (
+                    {canEditCurrentRow && (
                       <button
                         className="text-blue-600 hover:text-blue-700 text-xs flex items-center gap-1"
                         onClick={addMeasurement}
@@ -1686,9 +1733,9 @@ export default function ReviewPage() {
                           value={val}
                           onChange={(e) => updateMeasurement(i, e.target.value)}
                           placeholder="0"
-                          disabled={row.review_status === 'APPROVED'}
+                          disabled={!canEditCurrentRow}
                         />
-                        {row.review_status !== 'APPROVED' && (
+                        {canEditCurrentRow && (
                           <button
                             className="absolute right-1 top-1/2 -translate-y-1/2 text-gray-400 hover:text-red-500"
                             onClick={() => removeMeasurement(i)}

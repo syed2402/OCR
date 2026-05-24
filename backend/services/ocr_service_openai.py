@@ -66,8 +66,8 @@ The "quantity" field is the expected count of machine values for that row.
    - Every measurement must be a JSON number, never text
    - DO NOT repeat values to fill empty table cells
    - Ignore blank cells, crossed/X cells, printed tolerance text, and printed equipment ranges
-   - If quantity is more than the visible Actual columns in one printed line, continue reading the wrapped/next visual line for the same operation row
-   - Do not create a separate JSON row for continuation values; append them to the same measurements array
+   - If quantity is more than the visible Actual columns in one printed quantity row, continue reading the wrapped/next visual line for that same quantity row
+   - Do not append values from a separate printed quantity row into the previous quantity row
    - Example: if operation 1250 visually spans four sub-rows, all numbers in those four sub-rows belong to 1250, even if 1290 appears below
    - Do NOT move 1250 continuation values into the 1290 row
    - Before returning JSON, cross-check every measurements array against the left operation-code column
@@ -96,6 +96,8 @@ operation_number:
   - Usually in the leftmost column
   - It may span multiple visual sub-rows. All actual values inside that vertical span belong to that same operation code
   - Do NOT assign continuation values to the next visible operation code below
+  - If the printed operation-code cell is tall and covers multiple process/quantity lines, every line inside that vertical cell keeps that operation code
+  - Do not start the next operation number until its own operation-code cell actually begins in the far-left column
 
 engine_number:
   - 5-6 digit number (e.g., "105925")
@@ -105,6 +107,11 @@ quantity:
   - Extract the row quantity / sample count from the PDF if visible
   - This controls how many machine values are valid for the row
   - Use null if the quantity is not visible
+  - If the same operation code has multiple printed quantity/sample-count rows, return them as separate JSON rows
+  - Example: operation 1210 with printed quantities 4 and 2 must return two rows for op 1210, not one row with quantity 6
+  - If one operation cell visually spans several quantity lines, each printed quantity line is still a separate JSON row
+  - Example: operation 1520 with three vertical quantity lines 1, 1, and 1 must return three rows for op 1520
+  - Example: if operation 1570 spans three printed quantity/process lines, return three rows for op 1570; do not assign the third line to 1580
 
 process_description:
   - Text description of the operation
@@ -309,22 +316,40 @@ def _merge_continuation_rows(rows: list[dict]) -> list[dict]:
     for row in rows:
         op = str(row.get("operation_number") or "").strip()
         measurements = row.get("measurements") or []
+        current_op = str(current.get("operation_number") or "").strip() if current else ""
 
-        if op:
+        if (
+            op
+            and current is not None
+            and op == current_op
+            and row.get("quantity") is not None
+            and row.get("quantity") == current.get("quantity")
+            and (row.get("process_name") or row.get("process") or "") == (current.get("process_name") or current.get("process") or "")
+            and row.get("quantity", 0) > 6
+            and len(current.get("measurements") or []) < row.get("quantity", 0)
+        ):
+            current_measurements = current.setdefault("measurements", [])
+            next_measurements = measurements[: max(0, row["quantity"] - len(current_measurements))]
+            current_measurements.extend(next_measurements)
+        elif op:
             current = row
             merged.append(row)
         elif current is not None and measurements:
+            if row.get("quantity") is not None:
+                row["operation_number"] = current.get("operation_number")
+                row.setdefault("engine_number", current.get("engine_number"))
+                row.setdefault("process_name", current.get("process_name"))
+                row.setdefault("process", current.get("process"))
+                current = row
+                merged.append(row)
+                continue
+
             current_measurements = current.setdefault("measurements", [])
             current_measurements.extend(measurements)
             current_quantity = current.get("quantity")
+            row_quantity = row.get("quantity")
             if current_quantity is None or current_quantity < len(current_measurements):
                 current["quantity"] = len(current_measurements)
-
-    for row in merged:
-        measurements = row.get("measurements") or []
-        quantity = row.get("quantity")
-        if quantity is None or quantity < len(measurements):
-            row["quantity"] = len(measurements) if measurements else quantity
 
     return merged
 
