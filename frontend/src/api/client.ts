@@ -3,7 +3,12 @@
  * All requests go through the Vite proxy (/api → http://localhost:8000).
  */
 
-const BASE = (import.meta.env.VITE_API_BASE ?? '/api').replace(/\/$/, '')
+const API_BASE =
+  import.meta.env.VITE_API_BASE ??
+  import.meta.env.VITE_API_URL ??
+  (import.meta.env.DEV ? '/api' : '')
+
+const BASE = API_BASE.replace(/\/$/, '')
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
