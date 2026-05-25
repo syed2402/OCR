@@ -267,6 +267,8 @@ def get_upload_rows(upload_id: str, db: Session = Depends(get_db)):
         .order_by(
             # Sort by page number first (stored in raw_ocr_json->>'page')
             _text("(raw_ocr_json->>'page')::int ASC NULLS LAST"),
+            _text("NULLIF(raw_ocr_json#>>'{template,source_row}', '')::int ASC NULLS LAST"),
+            _text("NULLIF(raw_ocr_json#>>'{template,sequence}', '')::int ASC NULLS LAST"),
             _text("NULLIF(regexp_replace(operation_number, '\\D', '', 'g'), '')::int ASC NULLS LAST"),
             ExtractedOperation.id.asc(),
         )
@@ -278,6 +280,8 @@ def get_upload_rows(upload_id: str, db: Session = Depends(get_db)):
         .filter(ExtractedOperation.upload_id == upload_id)
         .order_by(
             _text("(raw_ocr_json->>'page')::int ASC NULLS LAST"),
+            _text("NULLIF(raw_ocr_json#>>'{template,source_row}', '')::int ASC NULLS LAST"),
+            _text("NULLIF(raw_ocr_json#>>'{template,sequence}', '')::int ASC NULLS LAST"),
             _text("NULLIF(regexp_replace(operation_number, '\\D', '', 'g'), '')::int ASC NULLS LAST"),
             ExtractedOperation.id.asc(),
         )
