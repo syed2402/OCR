@@ -108,6 +108,11 @@ def _clean_op(value) -> str | None:
     return "&".join(parts) if parts else None
 
 
+def _template_op_text(value) -> str | None:
+    text = _clean_text(value)
+    return text if _clean_op(text) else None
+
+
 def _op_aliases(operation_number: str | None) -> set[str]:
     op = _clean_op(operation_number)
     if not op:
@@ -148,14 +153,17 @@ def _extract_rows_from_workbook(path: Path) -> list[dict]:
 
         sheet = workbook[sheet_name]
         current_op: str | None = None
+        current_op_key: str | None = None
         current_process: str | None = None
         current_equipment: str | None = None
         sequence_by_op: dict[str, int] = {}
 
         for row_num in range(spec["start"], sheet.max_row + 1):
-            op = _clean_op(sheet.cell(row_num, spec["op"]).value)
-            if op:
-                current_op = op
+            op_cell = sheet.cell(row_num, spec["op"]).value
+            op_key = _clean_op(op_cell)
+            if op_key:
+                current_op = _template_op_text(op_cell) or op_key
+                current_op_key = op_key
                 current_process = _clean_text(sheet.cell(row_num, spec["process"]).value) or current_process
                 current_equipment = (
                     _clean_text(sheet.cell(row_num, spec["tightening_equipment"]).value)
@@ -163,7 +171,7 @@ def _extract_rows_from_workbook(path: Path) -> list[dict]:
                 )
 
             quantity = _clean_quantity(sheet.cell(row_num, spec["quantity"]).value)
-            if not current_op or current_op in _excluded_ops() or quantity is None:
+            if not current_op or not current_op_key or current_op_key in _excluded_ops() or quantity is None:
                 continue
 
             process_name = _clean_text(sheet.cell(row_num, spec["process"]).value) or current_process
@@ -175,7 +183,7 @@ def _extract_rows_from_workbook(path: Path) -> list[dict]:
                 "model": spec["model"],
                 "sheet_name": sheet_name,
                 "operation_number": current_op,
-                "sequence": sequence_by_op.get(current_op, 0) + 1,
+                "sequence": sequence_by_op.get(current_op_key, 0) + 1,
                 "process_name": process_name,
                 "tightening_equipment": tightening_equipment,
                 "tightening_part": _clean_text(sheet.cell(row_num, spec.get("tightening_part", 0)).value)
@@ -189,11 +197,11 @@ def _extract_rows_from_workbook(path: Path) -> list[dict]:
                 "checking_equipment": _clean_text(sheet.cell(row_num, spec["checking_equipment"]).value),
                 "source_row": row_num,
             }
-            override_quantity = _quantity_override(row["model"], current_op, row["sequence"])
+            override_quantity = _quantity_override(row["model"], current_op_key, row["sequence"])
             if override_quantity is not None:
                 row["quantity"] = override_quantity
             if any(row.get(k) for k in ("process_name", "tightening_torque", "engineering_spec")):
-                sequence_by_op[current_op] = row["sequence"]
+                sequence_by_op[current_op_key] = row["sequence"]
                 extracted.append(row)
 
     return extracted
@@ -201,6 +209,10 @@ def _extract_rows_from_workbook(path: Path) -> list[dict]:
 
 def seed_standard_templates(db: Session, force: bool = False) -> int:
     """Seed template rows from the standard workbook if the DB table is empty."""
+    if force:
+        db.query(StandardTemplateRow).delete(synchronize_session=False)
+        db.commit()
+
     excluded_ops = _excluded_ops()
     if excluded_ops:
         deleted = (
@@ -215,8 +227,6 @@ def seed_standard_templates(db: Session, force: bool = False) -> int:
     existing = db.query(StandardTemplateRow).count()
     if existing and not force:
         return existing
-    if force:
-        db.query(StandardTemplateRow).delete()
 
     rows = _extract_rows_from_workbook(_template_path())
     for row in rows:
@@ -251,7 +261,7 @@ def _load_db_template_rows(db: Session) -> list[dict]:
         .all()
     )
     if rows:
-        return [_row_to_dict(row) for row in rows]
+        return _dedupe_template_rows(_row_to_dict(row) for row in rows)
 
     seed_standard_templates(db)
     rows = (
@@ -259,7 +269,26 @@ def _load_db_template_rows(db: Session) -> list[dict]:
         .order_by(StandardTemplateRow.model, StandardTemplateRow.id)
         .all()
     )
-    return [_row_to_dict(row) for row in rows]
+    return _dedupe_template_rows(_row_to_dict(row) for row in rows)
+
+
+def _dedupe_template_rows(rows: Iterable[dict]) -> list[dict]:
+    deduped: list[dict] = []
+    seen: set[tuple] = set()
+    for row in rows:
+        key = (
+            row.get("model"),
+            _clean_op(row.get("operation_number")),
+            row.get("sequence"),
+            row.get("process_name"),
+            row.get("quantity"),
+            row.get("source_row"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+    return deduped
 
 
 @lru_cache(maxsize=1)
