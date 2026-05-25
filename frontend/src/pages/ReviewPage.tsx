@@ -803,7 +803,8 @@ export default function ReviewPage() {
         right &&
         (left.page ?? 1) === (right.page ?? 1) &&
         isRealOperationNumber(left.operation_number) &&
-        String(left.operation_number).trim() === String(right.operation_number).trim(),
+        String(left.operation_number).trim() === String(right.operation_number).trim() &&
+        String(left.process_name ?? '').trim() === String(right.process_name ?? '').trim()
       )
     const rowSpanForRecordGroup = (params: { api: GridApi<SheetRow>; data?: SheetRow }) => {
       if (!params.data?.id) return 1
