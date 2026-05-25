@@ -95,7 +95,7 @@ def on_startup():
         from database import SessionLocal
         db = SessionLocal()
         try:
-            seed_standard_templates(db)
+            seed_standard_templates(db, force=True)
         finally:
             db.close()
     except Exception:

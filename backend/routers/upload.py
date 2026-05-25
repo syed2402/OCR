@@ -26,7 +26,7 @@ from models import ExtractedOperation, Upload
 from services.cloud_storage import upload_review_image
 from services.ocr_service import extract_from_image
 from services.pdf_processor import pdf_to_images, resolve_poppler_path
-from services.standard_template import apply_standard_template, default_template_model
+from services.standard_template import apply_standard_template, default_template_model, seed_standard_templates
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -109,6 +109,10 @@ def _process_upload(upload_id: str, pdf_path: str, db_url: str) -> None:
         if not upload:
             logger.error("Upload %s not found in background task", upload_id)
             return
+
+        # The workbook/rules are the source of truth for printed values. Refresh
+        # before each upload so replaced templates never leave stale DB rows.
+        seed_standard_templates(db, force=True)
 
         # Step 1 — PDF → page images (pass poppler_path explicitly)
         def mark_page_rendered(page_num: int, _image_path: str) -> None:
@@ -441,6 +445,7 @@ def _retry_page_background(upload_id: str, page_num: int, image_path: str, db_ur
 
         upload = db.query(Upload).filter(Upload.id == upload_id).first()
         preferred_template_model = _template_model_from_filename(upload.original_filename if upload else None)
+        seed_standard_templates(db, force=True)
         retry_rows = result.get("rows", [])
         retry_rows, template_model = apply_standard_template(retry_rows, db, preferred_template_model)
         if not retry_rows:
