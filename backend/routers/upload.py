@@ -55,6 +55,7 @@ OCR_PAGE_TIMEOUT_SECONDS = int(os.getenv("OCR_PAGE_TIMEOUT_SECONDS", "75"))
 OCR_PAGE_RETRIES = max(1, min(3, int(os.getenv("OCR_PAGE_RETRIES", "2"))))
 OCR_WORKERS = max(1, min(4, int(os.getenv("OCR_WORKERS", "1"))))
 UPLOAD_REVIEW_IMAGES_DURING_OCR = os.getenv("UPLOAD_REVIEW_IMAGES_DURING_OCR", "false").lower() in {"1", "true", "yes"}
+PROCESS_UPLOAD_INLINE = os.getenv("PROCESS_UPLOAD_INLINE", "false").lower() in {"1", "true", "yes"}
 
 
 def _quantity_from_row_data(row_data: dict) -> int | None:
@@ -525,7 +526,10 @@ async def upload_pdf(
         "DATABASE_URL",
         "postgresql://quality_user:quality_pass@localhost:5432/stellantis_quality",
     )
-    background_tasks.add_task(_process_upload, upload_id, str(pdf_path), db_url)
+    if PROCESS_UPLOAD_INLINE:
+        _process_upload(upload_id, str(pdf_path), db_url)
+    else:
+        background_tasks.add_task(_process_upload, upload_id, str(pdf_path), db_url)
 
     return {
         "status": "success",
