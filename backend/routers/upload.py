@@ -19,6 +19,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from database import get_db
@@ -46,6 +47,7 @@ def _backend_path(env_name: str, default: str) -> Path:
 UPLOAD_DIR = _backend_path("UPLOAD_DIR", "static/uploads")
 ROW_IMAGES_DIR = _backend_path("ROW_IMAGES_DIR", "static/row_images")
 STALE_STARTUP_MINUTES = 5
+STALE_PROCESSING_MINUTES = int(os.getenv("STALE_PROCESSING_MINUTES", "8"))
 
 
 def _quantity_from_row_data(row_data: dict) -> int | None:
@@ -67,6 +69,56 @@ def _machine_values_for_quantity(row_data: dict, quantity: int | None) -> list[f
         except (TypeError, ValueError):
             logger.warning("Dropping non-numeric machine value for op %s: %r", row_data.get("operation_number"), value)
     return values
+
+
+def _reconcile_stale_processing_upload(upload: Upload, db: Session) -> bool:
+    """Recover Render uploads when the in-process background task stops mid-run."""
+    if upload.status != "PROCESSING" or not upload.created_at:
+        return False
+
+    row_count, latest_row_at = (
+        db.query(func.count(ExtractedOperation.id), func.max(ExtractedOperation.created_at))
+        .filter(ExtractedOperation.upload_id == upload.id)
+        .one()
+    )
+    row_count = int(row_count or 0)
+    now = datetime.now()
+    changed = False
+
+    if row_count and row_count != (upload.total_rows or 0):
+        upload.total_rows = row_count
+        changed = True
+
+    if (
+        row_count == 0
+        and (upload.processed_pages or 0) == 0
+        and now - upload.created_at > timedelta(minutes=STALE_STARTUP_MINUTES)
+    ):
+        upload.status = "FAILED"
+        upload.error_message = (
+            "Processing worker stopped before page extraction started. "
+            "Please retry the upload."
+        )
+        upload.completed_at = now
+        return True
+
+    last_progress_at = latest_row_at or upload.created_at
+    if now - last_progress_at <= timedelta(minutes=STALE_PROCESSING_MINUTES):
+        return changed
+
+    if row_count > 0:
+        upload.status = "COMPLETED"
+        upload.total_rows = row_count
+        upload.error_message = (
+            f"Render processing stopped after {row_count} rows; saved rows are available for review."
+        )
+        upload.completed_at = now
+        return True
+
+    upload.status = "FAILED"
+    upload.error_message = "Processing timed out before any rows were saved. Please retry the upload."
+    upload.completed_at = now
+    return True
 
 
 def _template_model_from_filename(filename: str | None) -> str | None:
@@ -365,19 +417,7 @@ def get_upload_status(upload_id: str, db: Session = Depends(get_db)):
     if not upload:
         raise HTTPException(status_code=404, detail="Upload not found")
 
-    if (
-        upload.status == "PROCESSING"
-        and upload.created_at
-        and upload.processed_pages == 0
-        and upload.total_rows == 0
-        and datetime.now() - upload.created_at > timedelta(minutes=STALE_STARTUP_MINUTES)
-    ):
-        upload.status = "FAILED"
-        upload.error_message = (
-            "Processing worker stopped before page extraction started. "
-            "Please retry the upload."
-        )
-        upload.completed_at = datetime.now()
+    if _reconcile_stale_processing_upload(upload, db):
         db.commit()
         db.refresh(upload)
 
@@ -680,6 +720,13 @@ def delete_upload(upload_id: str, db: Session = Depends(get_db)):
 def list_uploads(db: Session = Depends(get_db)):
     """Return all uploads ordered by most recent first."""
     uploads = db.query(Upload).order_by(Upload.created_at.desc()).limit(50).all()
+    changed = False
+    for upload in uploads:
+        changed = _reconcile_stale_processing_upload(upload, db) or changed
+    if changed:
+        db.commit()
+        for upload in uploads:
+            db.refresh(upload)
     return [
         {
             "upload_id": str(u.id),
