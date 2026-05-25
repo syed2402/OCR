@@ -394,7 +394,7 @@ def _template_enriched_row(template: dict, base: dict | None, model: str, measur
     }
 
 
-def _fill_template_gaps(corrected: list[dict], template_rows: list[dict], model: str, max_gap_rows: int = 4) -> list[dict]:
+def _fill_template_gaps(corrected: list[dict], template_rows: list[dict], model: str, max_gap_rows: int = 12) -> list[dict]:
     if len(corrected) < 2:
         return corrected
 
