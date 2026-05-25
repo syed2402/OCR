@@ -13,6 +13,7 @@ Endpoints:
 
 import logging
 import math
+import re
 from datetime import date
 from typing import Optional
 
@@ -21,13 +22,65 @@ from sqlalchemy import distinct, func
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models import ExtractedOperation, StandardTemplateRow
+from models import ExtractedOperation, StandardTemplateRow, Upload
 from services.standard_template import _clean_op, _parse_limits
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _APPROVED = "APPROVED"
+_MONTHS = {
+    "jan": 1,
+    "january": 1,
+    "feb": 2,
+    "february": 2,
+    "mar": 3,
+    "march": 3,
+    "apr": 4,
+    "april": 4,
+    "may": 5,
+    "jun": 6,
+    "june": 6,
+    "jul": 7,
+    "july": 7,
+    "aug": 8,
+    "august": 8,
+    "sep": 9,
+    "sept": 9,
+    "september": 9,
+    "oct": 10,
+    "october": 10,
+    "nov": 11,
+    "november": 11,
+    "dec": 12,
+    "december": 12,
+}
+
+
+def _date_from_filename(filename: str | None, fallback_year: int) -> date | None:
+    if not filename:
+        return None
+    match = re.search(
+        r"\b(\d{1,2})(?:st|nd|rd|th)?\s*[-_ ]*\s*"
+        r"(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
+        r"aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b",
+        filename,
+        flags=re.I,
+    )
+    if not match:
+        return None
+    day = int(match.group(1))
+    month = _MONTHS.get(match.group(2).lower())
+    if not month:
+        return None
+    try:
+        return date(fallback_year, month, day)
+    except ValueError:
+        return None
+
+
+def _display_date(value: date | None) -> str | None:
+    return value.isoformat() if value else None
 
 
 def _template_limits_for_row(row: ExtractedOperation, db: Session) -> tuple[float | None, float | None, float | None]:
@@ -177,11 +230,25 @@ def get_analytics(
     all_measurements: list[float] = []
     lower_limits: list[float] = []
     upper_limits: list[float] = []
+    upload_ids = [row.upload_id for row in rows if row.upload_id]
+    uploads = {
+        upload.id: upload
+        for upload in db.query(Upload).filter(Upload.id.in_(upload_ids)).all()
+    } if upload_ids else {}
 
     for r in rows:
         measurements = r.measurements_json or []
         judgement = (r.judgement or "").upper()
         row_data = (r.raw_ocr_json or {}).get("row_data", {}) if isinstance(r.raw_ocr_json, dict) else {}
+        upload = uploads.get(r.upload_id)
+        year = (
+            r.audit_date.year
+            if r.audit_date
+            else upload.created_at.year
+            if upload and upload.created_at
+            else date.today().year
+        )
+        display_date = _date_from_filename(upload.original_filename if upload else None, year) or r.audit_date
         nominal = row_data.get("nominal")
         lower_limit = row_data.get("lower_limit")
         upper_limit = row_data.get("upper_limit")
@@ -212,7 +279,11 @@ def get_analytics(
         serialised_rows.append(
             {
                 "id": r.id,
-                "audit_date": r.audit_date.isoformat() if r.audit_date else None,
+                "audit_date": _display_date(display_date),
+                "column_key": str(r.upload_id) if r.upload_id else _display_date(display_date),
+                "column_label": _display_date(display_date),
+                "upload_id": str(r.upload_id) if r.upload_id else None,
+                "upload_filename": upload.original_filename if upload else None,
                 "measurements": measurements,
                 "judgement": r.judgement,
                 "nominal": nominal,

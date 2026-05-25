@@ -48,9 +48,14 @@ function statusByLimit(value: number | null | undefined, lower?: number | null, 
 
 export default function MeasurementsTable({ operationNumber, rows }: Props) {
   const matrix = useMemo(() => {
-    const dates = Array.from(
-      new Set(rows.map((row) => row.audit_date).filter((date): date is string => Boolean(date))),
-    ).sort()
+    const columns = Array.from(
+      new Map(
+        rows.map((row) => {
+          const key = row.column_key ?? row.audit_date ?? String(row.id)
+          return [key, { key, label: row.column_label ?? row.audit_date ?? row.upload_filename ?? key }]
+        }),
+      ).values(),
+    ).sort((left, right) => left.label.localeCompare(right.label))
 
     const maxMeasurements = Math.max(0, ...rows.map((row) => row.measurements.length))
     const firstWithLimits = rows.find(
@@ -58,12 +63,12 @@ export default function MeasurementsTable({ operationNumber, rows }: Props) {
     )
 
     return {
-      dates,
+      columns,
       maxMeasurements: Math.max(
         maxMeasurements,
-        ...dates.map((date) =>
+        ...columns.map((column) =>
           rows
-            .filter((row) => row.audit_date === date)
+            .filter((row) => (row.column_key ?? row.audit_date ?? String(row.id)) === column.key)
             .reduce((sum, row) => sum + row.measurements.length, 0),
         ),
       ),
@@ -76,10 +81,11 @@ export default function MeasurementsTable({ operationNumber, rows }: Props) {
     return <p className="text-center text-gray-400 py-8 text-sm">No data</p>
   }
 
-  const rowsForDate = (date: string) => rows.filter((row) => row.audit_date === date)
+  const rowsForColumn = (columnKey: string) =>
+    rows.filter((row) => (row.column_key ?? row.audit_date ?? String(row.id)) === columnKey)
 
-  const measurementsForDate = (date: string): MeasurementCell[] =>
-    rowsForDate(date).flatMap((row) =>
+  const measurementsForColumn = (columnKey: string): MeasurementCell[] =>
+    rowsForColumn(columnKey).flatMap((row) =>
       row.measurements
         .filter((value): value is number => typeof value === 'number')
         .map((value) => ({
@@ -89,8 +95,8 @@ export default function MeasurementsTable({ operationNumber, rows }: Props) {
         })),
     )
 
-  const nokCountForDate = (date: string) => {
-    const dateRows = rowsForDate(date)
+  const nokCountForColumn = (columnKey: string) => {
+    const dateRows = rowsForColumn(columnKey)
     const hasLimits = matrix.lowerLimit !== null && matrix.upperLimit !== null
     if (!hasLimits) return dateRows.filter(isNok).length
 
@@ -101,20 +107,20 @@ export default function MeasurementsTable({ operationNumber, rows }: Props) {
     )
   }
 
-  const okCountForDate = (date: string) => {
-    const dateRows = rowsForDate(date)
+  const okCountForColumn = (columnKey: string) => {
+    const dateRows = rowsForColumn(columnKey)
     const hasLimits = matrix.lowerLimit !== null && matrix.upperLimit !== null
     if (!hasLimits) return dateRows.filter(isOk).length
 
     const totalValues = dateRows.reduce((sum, row) => sum + row.measurements.length, 0)
-    return Math.max(0, totalValues - nokCountForDate(date))
+    return Math.max(0, totalValues - nokCountForColumn(columnKey))
   }
 
-  const measurementCountForDate = (date: string) =>
-    rowsForDate(date).reduce((sum, row) => sum + row.measurements.length, 0)
+  const measurementCountForColumn = (columnKey: string) =>
+    rowsForColumn(columnKey).reduce((sum, row) => sum + row.measurements.length, 0)
 
-  const limitForDate = (date: string, field: 'upper_limit' | 'lower_limit') => {
-    const dateRows = rowsForDate(date)
+  const limitForColumn = (columnKey: string, field: 'upper_limit' | 'lower_limit') => {
+    const dateRows = rowsForColumn(columnKey)
     const rowWithLimit = dateRows.find((row) => row[field] !== null && row[field] !== undefined)
     return formatNumber(rowWithLimit?.[field] ?? matrix[field === 'upper_limit' ? 'upperLimit' : 'lowerLimit'])
   }
@@ -123,12 +129,12 @@ export default function MeasurementsTable({ operationNumber, rows }: Props) {
     <div className="overflow-x-auto">
       <table
         className="table-fixed border-collapse text-sm"
-        style={{ width: `${176 + matrix.dates.length * 128}px` }}
+        style={{ width: `${176 + matrix.columns.length * 128}px` }}
       >
         <colgroup>
           <col style={{ width: 176 }} />
-          {matrix.dates.map((date) => (
-            <col key={date} style={{ width: 128 }} />
+          {matrix.columns.map((column) => (
+            <col key={column.key} style={{ width: 128 }} />
           ))}
         </colgroup>
         <tbody>
@@ -136,7 +142,7 @@ export default function MeasurementsTable({ operationNumber, rows }: Props) {
             <th className="sticky left-0 z-10 border border-slate-300 bg-white px-4 py-3 text-left font-semibold text-slate-800">
               Opn Code
             </th>
-            <td className="border border-slate-300 px-4 py-3 text-center font-mono font-semibold" colSpan={matrix.dates.length}>
+            <td className="border border-slate-300 px-4 py-3 text-center font-mono font-semibold" colSpan={matrix.columns.length}>
               {operationNumber}
             </td>
           </tr>
@@ -145,27 +151,27 @@ export default function MeasurementsTable({ operationNumber, rows }: Props) {
             <th className="sticky left-0 z-10 border border-slate-300 bg-slate-50 px-4 py-3 text-left font-semibold text-slate-800">
               Date
             </th>
-            {matrix.dates.map((date) => (
-              <td key={date} className="border border-slate-300 px-3 py-3 text-center font-mono font-semibold">
-                {formatDate(date)}
+            {matrix.columns.map((column) => (
+              <td key={column.key} className="border border-slate-300 px-3 py-3 text-center font-mono font-semibold">
+                {formatDate(column.label)}
               </td>
             ))}
           </tr>
 
           {[
-            ['Upper Limit', (date: string) => limitForDate(date, 'upper_limit')],
-            ['Lower Limit', (date: string) => limitForDate(date, 'lower_limit')],
+            ['Upper Limit', (columnKey: string) => limitForColumn(columnKey, 'upper_limit')],
+            ['Lower Limit', (columnKey: string) => limitForColumn(columnKey, 'lower_limit')],
             [
               'No of measurements',
-              measurementCountForDate,
+              measurementCountForColumn,
             ],
-            ['OK count', okCountForDate],
-            ['NOK count', nokCountForDate],
+            ['OK count', okCountForColumn],
+            ['NOK count', nokCountForColumn],
             [
               'NOK %',
-              (date: string) => {
-                const total = measurementCountForDate(date)
-                return total ? `${((nokCountForDate(date) / total) * 100).toFixed(1)}%` : ''
+              (columnKey: string) => {
+                const total = measurementCountForColumn(columnKey)
+                return total ? `${((nokCountForColumn(columnKey) / total) * 100).toFixed(1)}%` : ''
               },
             ],
           ].map(([label, getter]) => (
@@ -173,9 +179,9 @@ export default function MeasurementsTable({ operationNumber, rows }: Props) {
               <th className="sticky left-0 z-10 border border-slate-300 bg-white px-4 py-3 text-left font-medium text-slate-700">
                 {String(label)}
               </th>
-              {matrix.dates.map((date) => (
-                <td key={date} className="border border-slate-300 px-3 py-3 text-center font-mono">
-                  {(getter as (date: string) => string | number)(date)}
+              {matrix.columns.map((column) => (
+                <td key={column.key} className="border border-slate-300 px-3 py-3 text-center font-mono">
+                  {(getter as (columnKey: string) => string | number)(column.key)}
                 </td>
               ))}
             </tr>
@@ -185,8 +191,8 @@ export default function MeasurementsTable({ operationNumber, rows }: Props) {
             <th className="sticky left-0 z-10 border border-slate-300 bg-slate-100 px-4 py-3 text-left font-semibold text-slate-800">
               Parameter
             </th>
-            {matrix.dates.map((date) => (
-              <th key={date} className="border border-slate-300 bg-slate-100 px-4 py-3" />
+            {matrix.columns.map((column) => (
+              <th key={column.key} className="border border-slate-300 bg-slate-100 px-4 py-3" />
             ))}
           </tr>
 
@@ -195,11 +201,11 @@ export default function MeasurementsTable({ operationNumber, rows }: Props) {
               <th className="sticky left-0 z-10 border border-slate-300 bg-white px-4 py-3 text-left font-semibold text-slate-800">
                 M{index + 1}
               </th>
-              {matrix.dates.map((date) => {
-                const measurement = measurementsForDate(date)[index]
+              {matrix.columns.map((column) => {
+                const measurement = measurementsForColumn(column.key)[index]
                 const status = statusByLimit(measurement?.value, measurement?.lower, measurement?.upper)
                 return (
-                  <td key={date} className="border border-slate-300 px-3 py-3 text-center font-mono">
+                  <td key={column.key} className="border border-slate-300 px-3 py-3 text-center font-mono">
                     {!measurement ? '' : (
                       <span className={status === 'NOK' ? 'font-semibold text-red-700' : 'text-slate-950'}>
                         {formatNumber(measurement.value)}

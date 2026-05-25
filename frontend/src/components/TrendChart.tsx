@@ -52,32 +52,38 @@ function CustomTooltip({ active, payload, label }: TooltipProps<number, string>)
 
 export default function TrendChart({ rows }: Props) {
   const chartData = useMemo(() => {
-    const byDate = new Map<string, {
+    const byColumn = new Map<string, {
+      label: string
       values: number[]
       lower: number | null
       upper: number | null
     }>()
 
     rows.forEach((row) => {
-      const key = row.audit_date ?? 'Unknown'
-      const bucket = byDate.get(key) ?? { values: [], lower: null, upper: null }
+      const key = row.column_key ?? row.audit_date ?? String(row.id)
+      const bucket = byColumn.get(key) ?? {
+        label: row.column_label ?? row.audit_date ?? row.upload_filename ?? key,
+        values: [],
+        lower: null,
+        upper: null,
+      }
       bucket.values.push(...row.measurements.filter((value): value is number => typeof value === 'number'))
       bucket.lower = bucket.lower ?? row.lower_limit ?? null
       bucket.upper = bucket.upper ?? row.upper_limit ?? null
-      byDate.set(key, bucket)
+      byColumn.set(key, bucket)
     })
 
-    return Array.from(byDate.entries())
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([rawDate, bucket]) => {
+    return Array.from(byColumn.entries())
+      .sort(([, left], [, right]) => left.label.localeCompare(right.label))
+      .map(([, bucket]) => {
         const avg = bucket.values.length
           ? bucket.values.reduce((sum, value) => sum + value, 0) / bucket.values.length
           : null
-        const date = rawDate === 'Unknown'
-          ? rawDate
+        const date = bucket.label === 'Unknown'
+          ? bucket.label
           : (() => {
-              try { return format(parseISO(rawDate), 'dd MMM') }
-              catch { return rawDate }
+              try { return format(parseISO(bucket.label), 'dd MMM') }
+              catch { return bucket.label }
             })()
 
         return {

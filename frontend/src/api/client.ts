@@ -88,6 +88,10 @@ export interface Operation {
 export interface AnalyticsRow {
   id: number
   audit_date: string | null
+  column_key?: string | null
+  column_label?: string | null
+  upload_id?: string | null
+  upload_filename?: string | null
   measurements: number[]
   judgement: string | null
   nominal?: number | null
