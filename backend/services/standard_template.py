@@ -290,33 +290,61 @@ def apply_standard_template(
             continue
         by_op.setdefault(template["operation_number"], []).append(template)
 
-    used_by_op: dict[str, int] = {}
     corrected: list[dict] = []
-    for row in ocr_rows:
+    index = 0
+    while index < len(ocr_rows):
+        row = ocr_rows[index]
         op = _clean_op(row.get("operation_number"))
         candidates = by_op.get(op or "")
         if not op or not candidates:
             corrected.append(row)
+            index += 1
             continue
 
-        index = used_by_op.get(op, 0)
-        template = candidates[min(index, len(candidates) - 1)]
-        used_by_op[op] = index + 1
+        group = [row]
+        index += 1
+        while index < len(ocr_rows) and _clean_op(ocr_rows[index].get("operation_number")) == op:
+            group.append(ocr_rows[index])
+            index += 1
 
-        spec_text = template.get("engineering_spec") or template.get("tightening_torque")
-        nominal, lower, upper = _parse_limits(spec_text)
-        enriched = {
-            **row,
-            "operation_number": template["operation_number"],
-            "process_name": template.get("process_name") or row.get("process_name"),
-            "process_description": template.get("process_name") or row.get("process_description"),
-            "quantity": template.get("quantity"),
-            "nominal": nominal if nominal is not None else row.get("nominal"),
-            "upper_limit": upper if upper is not None else row.get("upper_limit"),
-            "lower_limit": lower if lower is not None else row.get("lower_limit"),
-            "template": template,
-            "template_model": model,
-        }
-        corrected.append(enriched)
+        measurements: list[float] = []
+        measurement_scores: list[float] = []
+        for item in group:
+            measurements.extend(item.get("measurements") or [])
+            scores = (item.get("confidence_scores") or {}).get("measurements") or []
+            measurement_scores.extend(scores[: len(item.get("measurements") or [])])
+
+        measurement_offset = 0
+        score_offset = 0
+        for template_index, template in enumerate(candidates):
+            base = group[min(template_index, len(group) - 1)] if group else row
+            quantity = template.get("quantity")
+            take = max(0, int(quantity or 0))
+            template_measurements = measurements[measurement_offset: measurement_offset + take]
+            template_scores = measurement_scores[score_offset: score_offset + len(template_measurements)]
+            measurement_offset += take
+            score_offset += len(template_measurements)
+
+            confidence_scores = {**(base.get("confidence_scores") or {})}
+            if template_measurements:
+                confidence_scores["measurements"] = template_scores or confidence_scores.get("measurements") or []
+
+            spec_text = template.get("engineering_spec") or template.get("tightening_torque")
+            nominal, lower, upper = _parse_limits(spec_text)
+            enriched = {
+                **base,
+                "operation_number": template["operation_number"],
+                "process_name": template.get("process_name") or base.get("process_name"),
+                "process_description": template.get("process_name") or base.get("process_description"),
+                "quantity": quantity,
+                "nominal": nominal if nominal is not None else base.get("nominal"),
+                "upper_limit": upper if upper is not None else base.get("upper_limit"),
+                "lower_limit": lower if lower is not None else base.get("lower_limit"),
+                "measurements": template_measurements,
+                "confidence_scores": confidence_scores,
+                "template": template,
+                "template_model": model,
+            }
+            corrected.append(enriched)
 
     return corrected, model
