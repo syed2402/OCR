@@ -209,6 +209,8 @@ def _extract_rows_from_workbook(path: Path) -> list[dict]:
 
 def seed_standard_templates(db: Session, force: bool = False) -> int:
     """Seed template rows from the standard workbook if the DB table is empty."""
+    _template_rules.cache_clear()
+
     if force:
         db.query(StandardTemplateRow).delete(synchronize_session=False)
         db.commit()

@@ -3,6 +3,7 @@
   "excluded_ops": [],
   "quantity_overrides": {
     "EBDT": {
+      "1360": [2, 2],
       "1900": [1, 1, 2]
     }
   }
