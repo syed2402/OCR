@@ -354,6 +354,92 @@ def _parse_limits(text: str | None) -> tuple[float | None, float | None, float |
     return nominal, lower, upper
 
 
+def _template_key(template: dict | None) -> tuple | None:
+    if not template:
+        return None
+    return (
+        template.get("model"),
+        template.get("sheet_name"),
+        template.get("source_row"),
+        _clean_op(template.get("operation_number")),
+        template.get("sequence"),
+        template.get("process_name"),
+    )
+
+
+def _template_enriched_row(template: dict, base: dict | None, model: str, measurements: list[float] | None = None) -> dict:
+    source = base or {}
+    spec_text = template.get("engineering_spec") or template.get("tightening_torque")
+    nominal, lower, upper = _parse_limits(spec_text)
+    confidence_scores = {**(source.get("confidence_scores") or {})}
+    confidence_scores.update({
+        "operation_number": 1.0,
+        "process_name": 1.0,
+        "quantity": 1.0,
+    })
+    return {
+        **source,
+        "operation_number": template["operation_number"],
+        "process_name": template.get("process_name"),
+        "process_description": template.get("process_name"),
+        "quantity": template.get("quantity"),
+        "nominal": nominal,
+        "upper_limit": upper,
+        "lower_limit": lower,
+        "measurements": measurements or [],
+        "confidence_scores": confidence_scores,
+        "template": template,
+        "template_model": model,
+        "printed_values_source": "standard_template",
+    }
+
+
+def _fill_template_gaps(corrected: list[dict], template_rows: list[dict], model: str, max_gap_rows: int = 4) -> list[dict]:
+    if len(corrected) < 2:
+        return corrected
+
+    model_templates = [
+        row for row in template_rows
+        if row.get("model") == model and row.get("source_row") is not None
+    ]
+    by_sheet = {}
+    for template in model_templates:
+        by_sheet.setdefault(template.get("sheet_name"), []).append(template)
+    for sheet_rows in by_sheet.values():
+        sheet_rows.sort(key=lambda row: (row.get("source_row") or 0, row.get("sequence") or 0))
+
+    existing_keys = {_template_key(row.get("template")) for row in corrected}
+    filled: list[dict] = []
+    for previous, current in zip(corrected, corrected[1:]):
+        filled.append(previous)
+        prev_template = previous.get("template") or {}
+        current_template = current.get("template") or {}
+        if prev_template.get("sheet_name") != current_template.get("sheet_name"):
+            continue
+        prev_row = prev_template.get("source_row")
+        current_row = current_template.get("source_row")
+        if not isinstance(prev_row, int) or not isinstance(current_row, int):
+            continue
+        if current_row <= prev_row or current_row - prev_row > max_gap_rows + 1:
+            continue
+
+        for template in by_sheet.get(prev_template.get("sheet_name"), []):
+            source_row = template.get("source_row")
+            key = _template_key(template)
+            if prev_row < source_row < current_row and key not in existing_keys:
+                logger.info(
+                    "Filling missing template row %s seq %s between source rows %s and %s",
+                    template.get("operation_number"),
+                    template.get("sequence"),
+                    prev_row,
+                    current_row,
+                )
+                filled.append(_template_enriched_row(template, previous, model))
+                existing_keys.add(key)
+    filled.append(corrected[-1])
+    return filled
+
+
 def apply_standard_template(
     ocr_rows: list[dict],
     db: Session,
@@ -436,23 +522,8 @@ def apply_standard_template(
             if template_measurements:
                 confidence_scores["measurements"] = template_scores or confidence_scores.get("measurements") or []
 
-            spec_text = template.get("engineering_spec") or template.get("tightening_torque")
-            nominal, lower, upper = _parse_limits(spec_text)
-            enriched = {
-                **base,
-                "operation_number": template["operation_number"],
-                "process_name": template.get("process_name"),
-                "process_description": template.get("process_name"),
-                "quantity": quantity,
-                "nominal": nominal,
-                "upper_limit": upper,
-                "lower_limit": lower,
-                "measurements": template_measurements,
-                "confidence_scores": confidence_scores,
-                "template": template,
-                "template_model": model,
-                "printed_values_source": "standard_template",
-            }
+            enriched = _template_enriched_row(template, base, model, template_measurements)
+            enriched["confidence_scores"] = confidence_scores
             corrected.append(enriched)
 
-    return corrected, model
+    return _fill_template_gaps(corrected, template_rows, model), model
