@@ -17,25 +17,15 @@ interface Props {
   rows: AnalyticsRow[]
 }
 
-const LINE_COLORS = [
-  '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6',
-  '#06b6d4', '#f97316', '#84cc16', '#ec4899', '#14b8a6',
-]
-
-// ---------------------------------------------------------------------------
-// Rich custom tooltip
-// ---------------------------------------------------------------------------
 function CustomTooltip({ active, payload, label }: TooltipProps<number, string>) {
   if (!active || !payload?.length) return null
 
-  // Grab judgement from the first payload's data point
-  const judgement = (payload[0]?.payload as Record<string, unknown>)?.judgement as string | undefined
-  const isNok = judgement?.toUpperCase() === 'NOK'
+  const point = payload[0]?.payload as Record<string, unknown>
 
   return (
-    <div className="bg-gray-900 border border-gray-700 rounded-xl shadow-2xl p-3 min-w-[160px]">
+    <div className="bg-gray-900 border border-gray-700 rounded-lg shadow-2xl p-3 min-w-[180px]">
       <p className="text-gray-300 text-xs font-medium mb-2 border-b border-gray-700 pb-1.5">
-        📅 {label}
+        {label}
       </p>
       {payload.map((entry) => (
         <div key={entry.name} className="flex items-center justify-between gap-4 py-0.5">
@@ -47,48 +37,58 @@ function CustomTooltip({ active, payload, label }: TooltipProps<number, string>)
             {entry.name}
           </span>
           <span className="text-xs font-mono font-semibold text-white">
-            {entry.value ?? '—'}
+            {entry.value ?? '-'}
           </span>
         </div>
       ))}
-      {judgement && (
-        <div
-          className={`mt-2 pt-1.5 border-t border-gray-700 text-xs font-semibold text-center rounded ${
-            isNok ? 'text-red-400' : 'text-green-400'
-          }`}
-        >
-          {isNok ? '⚠ NOK' : '✓ OK'}
-        </div>
+      {typeof point.count === 'number' && (
+        <p className="mt-2 border-t border-gray-700 pt-1.5 text-xs text-gray-400">
+          {point.count} measurements
+        </p>
       )}
     </div>
   )
 }
 
 export default function TrendChart({ rows }: Props) {
-  const maxMeasurements = useMemo(
-    () => Math.max(0, ...rows.map((r) => r.measurements.length)),
-    [rows],
-  )
+  const chartData = useMemo(() => {
+    const byDate = new Map<string, {
+      values: number[]
+      lower: number | null
+      upper: number | null
+    }>()
 
-  const chartData = useMemo(
-    () =>
-      rows.map((r) => {
-        const point: Record<string, unknown> = {
-          date: r.audit_date
-            ? (() => {
-                try { return format(parseISO(r.audit_date), 'dd MMM') }
-                catch { return r.audit_date }
-              })()
-            : '—',
-          judgement: r.judgement,
+    rows.forEach((row) => {
+      const key = row.audit_date ?? 'Unknown'
+      const bucket = byDate.get(key) ?? { values: [], lower: null, upper: null }
+      bucket.values.push(...row.measurements.filter((value): value is number => typeof value === 'number'))
+      bucket.lower = bucket.lower ?? row.lower_limit ?? null
+      bucket.upper = bucket.upper ?? row.upper_limit ?? null
+      byDate.set(key, bucket)
+    })
+
+    return Array.from(byDate.entries())
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([rawDate, bucket]) => {
+        const avg = bucket.values.length
+          ? bucket.values.reduce((sum, value) => sum + value, 0) / bucket.values.length
+          : null
+        const date = rawDate === 'Unknown'
+          ? rawDate
+          : (() => {
+              try { return format(parseISO(rawDate), 'dd MMM') }
+              catch { return rawDate }
+            })()
+
+        return {
+          date,
+          avg: avg === null ? null : Number(avg.toFixed(2)),
+          lower: bucket.lower,
+          upper: bucket.upper,
+          count: bucket.values.length,
         }
-        for (let i = 0; i < maxMeasurements; i++) {
-          point[`M${i + 1}`] = r.measurements[i] ?? null
-        }
-        return point
-      }),
-    [rows, maxMeasurements],
-  )
+      })
+  }, [rows])
 
   if (rows.length === 0) {
     return <p className="text-center text-gray-400 py-8 text-sm">No data to chart</p>
@@ -97,7 +97,6 @@ export default function TrendChart({ rows }: Props) {
   return (
     <ResponsiveContainer width="100%" height={320}>
       <LineChart data={chartData} margin={{ top: 12, right: 24, bottom: 8, left: 4 }}>
-        {/* Lighter, less distracting grid */}
         <CartesianGrid strokeDasharray="4 4" stroke="#f3f4f6" vertical={false} />
         <XAxis
           dataKey="date"
@@ -111,28 +110,44 @@ export default function TrendChart({ rows }: Props) {
           tickLine={false}
           axisLine={false}
           width={44}
-          tickFormatter={(v) => String(v)}
+          tickFormatter={(value) => String(value)}
         />
         <Tooltip content={<CustomTooltip />} cursor={{ stroke: '#e5e7eb', strokeWidth: 1.5, strokeDasharray: '4 4' }} />
-        {maxMeasurements > 1 && (
-          <Legend
-            wrapperStyle={{ fontSize: 12, paddingTop: 12, color: '#6b7280' }}
-            iconType="circle"
-            iconSize={8}
-          />
-        )}
-        {Array.from({ length: maxMeasurements }, (_, i) => (
-          <Line
-            key={`M${i + 1}`}
-            type="monotone"
-            dataKey={`M${i + 1}`}
-            stroke={LINE_COLORS[i % LINE_COLORS.length]}
-            strokeWidth={2.5}
-            dot={{ r: 3.5, strokeWidth: 0, fill: LINE_COLORS[i % LINE_COLORS.length] }}
-            activeDot={{ r: 6, strokeWidth: 2, stroke: '#fff', fill: LINE_COLORS[i % LINE_COLORS.length] }}
-            connectNulls={false}
-          />
-        ))}
+        <Legend
+          wrapperStyle={{ fontSize: 12, paddingTop: 12, color: '#6b7280' }}
+          iconType="circle"
+          iconSize={8}
+        />
+        <Line
+          type="monotone"
+          name="Avg"
+          dataKey="avg"
+          stroke="#2563eb"
+          strokeWidth={2.5}
+          dot={{ r: 4, strokeWidth: 0, fill: '#2563eb' }}
+          activeDot={{ r: 6, strokeWidth: 2, stroke: '#fff', fill: '#2563eb' }}
+          connectNulls={false}
+        />
+        <Line
+          type="monotone"
+          name="Upper Limit"
+          dataKey="upper"
+          stroke="#dc2626"
+          strokeDasharray="6 4"
+          strokeWidth={2}
+          dot={false}
+          connectNulls={false}
+        />
+        <Line
+          type="monotone"
+          name="Lower Limit"
+          dataKey="lower"
+          stroke="#16a34a"
+          strokeDasharray="6 4"
+          strokeWidth={2}
+          dot={false}
+          connectNulls={false}
+        />
       </LineChart>
     </ResponsiveContainer>
   )
