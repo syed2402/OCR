@@ -52,8 +52,9 @@ ROW_IMAGES_DIR = _backend_path("ROW_IMAGES_DIR", "static/row_images")
 STALE_STARTUP_MINUTES = 5
 STALE_PROCESSING_MINUTES = int(os.getenv("STALE_PROCESSING_MINUTES", "8"))
 OCR_PAGE_TIMEOUT_SECONDS = int(os.getenv("OCR_PAGE_TIMEOUT_SECONDS", "120"))
-OCR_PAGE_WORKERS = max(1, min(4, int(os.getenv("OCR_PAGE_WORKERS", "2"))))
+OCR_PAGE_WORKERS = max(1, min(4, int(os.getenv("OCR_PAGE_WORKERS", "3"))))
 OCR_PAGE_RETRIES = max(1, min(3, int(os.getenv("OCR_PAGE_RETRIES", "2"))))
+UPLOAD_REVIEW_IMAGES_DURING_OCR = os.getenv("UPLOAD_REVIEW_IMAGES_DURING_OCR", "false").lower() in {"1", "true", "yes"}
 
 
 def _quantity_from_row_data(row_data: dict) -> int | None:
@@ -108,7 +109,11 @@ def _ocr_page_for_upload(upload_id: str, page_num: int, page_count: int, image_p
     logger.info("=" * 70)
     logger.info("PROCESSING PAGE %d/%d: %s", page_num, page_count, image_path)
     logger.info("=" * 70)
-    review_image_path = upload_review_image(image_path, upload_id, page_num) or image_path
+    review_image_path = (
+        upload_review_image(image_path, upload_id, page_num)
+        if UPLOAD_REVIEW_IMAGES_DURING_OCR
+        else None
+    ) or image_path
     result = None
     for attempt in range(1, OCR_PAGE_RETRIES + 1):
         result = _extract_from_image_with_timeout(image_path)
@@ -122,7 +127,7 @@ def _ocr_page_for_upload(upload_id: str, page_num: int, page_count: int, image_p
             result.get("error") or "0 rows",
         )
         if attempt < OCR_PAGE_RETRIES:
-            time.sleep(3 * attempt)
+            time.sleep(attempt)
     return {
         "page_num": page_num,
         "image_path": image_path,
@@ -686,7 +691,11 @@ def _retry_page_background(upload_id: str, page_num: int, image_path: str, db_ur
 
     try:
         logger.info("Retrying OCR for upload %s page %d", upload_id, page_num)
-        review_image_path = upload_review_image(image_path, upload_id, page_num) or image_path
+        review_image_path = (
+            upload_review_image(image_path, upload_id, page_num)
+            if UPLOAD_REVIEW_IMAGES_DURING_OCR
+            else None
+        ) or image_path
         result = _extract_from_image_with_timeout(image_path)
 
         if result.get("error"):
