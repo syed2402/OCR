@@ -14,6 +14,7 @@ import logging
 import os
 import queue
 import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
@@ -50,8 +51,9 @@ UPLOAD_DIR = _backend_path("UPLOAD_DIR", "static/uploads")
 ROW_IMAGES_DIR = _backend_path("ROW_IMAGES_DIR", "static/row_images")
 STALE_STARTUP_MINUTES = 5
 STALE_PROCESSING_MINUTES = int(os.getenv("STALE_PROCESSING_MINUTES", "8"))
-OCR_PAGE_TIMEOUT_SECONDS = int(os.getenv("OCR_PAGE_TIMEOUT_SECONDS", "210"))
+OCR_PAGE_TIMEOUT_SECONDS = int(os.getenv("OCR_PAGE_TIMEOUT_SECONDS", "120"))
 OCR_PAGE_WORKERS = max(1, min(4, int(os.getenv("OCR_PAGE_WORKERS", "2"))))
+OCR_PAGE_RETRIES = max(1, min(3, int(os.getenv("OCR_PAGE_RETRIES", "2"))))
 
 
 def _quantity_from_row_data(row_data: dict) -> int | None:
@@ -107,12 +109,25 @@ def _ocr_page_for_upload(upload_id: str, page_num: int, page_count: int, image_p
     logger.info("PROCESSING PAGE %d/%d: %s", page_num, page_count, image_path)
     logger.info("=" * 70)
     review_image_path = upload_review_image(image_path, upload_id, page_num) or image_path
-    result = _extract_from_image_with_timeout(image_path)
+    result = None
+    for attempt in range(1, OCR_PAGE_RETRIES + 1):
+        result = _extract_from_image_with_timeout(image_path)
+        if not result.get("error") and result.get("rows"):
+            break
+        logger.warning(
+            "Page %d OCR attempt %d/%d failed: %s",
+            page_num,
+            attempt,
+            OCR_PAGE_RETRIES,
+            result.get("error") or "0 rows",
+        )
+        if attempt < OCR_PAGE_RETRIES:
+            time.sleep(3 * attempt)
     return {
         "page_num": page_num,
         "image_path": image_path,
         "review_image_path": review_image_path,
-        "result": result,
+        "result": result or {"rows": [], "error": "OCR did not return a result"},
     }
 
 
