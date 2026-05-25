@@ -50,6 +50,11 @@ TORQUE_SHEETS = {
 }
 
 
+def _excluded_ops() -> set[str]:
+    raw = os.getenv("EXCLUDED_TEMPLATE_OPS", "1360")
+    return {re.sub(r"\D", "", item) for item in re.split(r"[,;\s]+", raw) if re.sub(r"\D", "", item)}
+
+
 def _clean_text(value) -> str | None:
     if value is None:
         return None
@@ -110,7 +115,7 @@ def _extract_rows_from_workbook(path: Path) -> list[dict]:
                 )
 
             quantity = _clean_quantity(sheet.cell(row_num, spec["quantity"]).value)
-            if not current_op or quantity is None:
+            if not current_op or current_op in _excluded_ops() or quantity is None:
                 continue
 
             process_name = _clean_text(sheet.cell(row_num, spec["process"]).value) or current_process
@@ -145,6 +150,17 @@ def _extract_rows_from_workbook(path: Path) -> list[dict]:
 
 def seed_standard_templates(db: Session, force: bool = False) -> int:
     """Seed template rows from the standard workbook if the DB table is empty."""
+    excluded_ops = _excluded_ops()
+    if excluded_ops:
+        deleted = (
+            db.query(StandardTemplateRow)
+            .filter(StandardTemplateRow.operation_number.in_(excluded_ops))
+            .delete(synchronize_session=False)
+        )
+        if deleted:
+            logger.info("Removed %d excluded standard template rows: %s", deleted, ", ".join(sorted(excluded_ops)))
+            db.commit()
+
     existing = db.query(StandardTemplateRow).count()
     if existing and not force:
         return existing
