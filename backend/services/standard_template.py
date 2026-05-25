@@ -394,7 +394,7 @@ def _parse_limits(text: str | None) -> tuple[float | None, float | None, float |
     if nominal is not None and nominal < 0 and (lower == abs(nominal) or upper == abs(nominal)):
         nominal = abs(nominal)
     if lower is not None and upper is not None and upper < lower:
-        upper = None
+        lower, upper = upper, lower
     return nominal, lower, upper
 
 
