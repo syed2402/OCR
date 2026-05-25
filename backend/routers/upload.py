@@ -16,7 +16,6 @@ import queue
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -52,7 +51,6 @@ ROW_IMAGES_DIR = _backend_path("ROW_IMAGES_DIR", "static/row_images")
 STALE_STARTUP_MINUTES = 5
 STALE_PROCESSING_MINUTES = int(os.getenv("STALE_PROCESSING_MINUTES", "8"))
 OCR_PAGE_TIMEOUT_SECONDS = int(os.getenv("OCR_PAGE_TIMEOUT_SECONDS", "120"))
-OCR_PAGE_WORKERS = max(1, min(4, int(os.getenv("OCR_PAGE_WORKERS", "3"))))
 OCR_PAGE_RETRIES = max(1, min(3, int(os.getenv("OCR_PAGE_RETRIES", "2"))))
 UPLOAD_REVIEW_IMAGES_DURING_OCR = os.getenv("UPLOAD_REVIEW_IMAGES_DURING_OCR", "false").lower() in {"1", "true", "yes"}
 
@@ -358,11 +356,76 @@ def _process_upload(upload_id: str, pdf_path: str, db_url: str) -> None:
         # before each upload so replaced templates never leave stale DB rows.
         seed_standard_templates(db, force=True)
 
-        # Step 1 — PDF → page images (pass poppler_path explicitly)
-        def mark_page_rendered(page_num: int, _image_path: str) -> None:
-            upload.processed_pages = max(upload.processed_pages or 0, page_num)
-            upload.error_message = f"Rendered page {page_num}; OCR will start after page extraction."
+        total_rows = 0
+        last_known_date: str | None = None
+        failed_pages: list[str] = []
+        preferred_template_model = _template_model_from_filename(upload.original_filename)
+
+        def process_page(page_num: int, image_path: str) -> None:
+            nonlocal total_rows, last_known_date
+            upload.error_message = f"Running OCR on page {page_num}."
             db.commit()
+            try:
+                page_result = _ocr_page_for_upload(str(upload_id), page_num, page_num, image_path)
+                result = page_result["result"]
+                review_image_path = page_result["review_image_path"]
+            except Exception as ocr_error:
+                logger.error("OCR EXCEPTION on page %d: %s", page_num, ocr_error, exc_info=True)
+                failed_pages.append(f"page {page_num}: {ocr_error}")
+                upload.processed_pages = max(upload.processed_pages or 0, page_num)
+                db.commit()
+                return
+
+            if result.get("error"):
+                logger.warning("OCR error on page %d: %s", page_num, result["error"])
+                failed_pages.append(f"page {page_num}: {result['error']}")
+                upload.processed_pages = max(upload.processed_pages or 0, page_num)
+                db.commit()
+                return
+
+            page_rows = result.get("rows", [])
+            page_rows, template_model = apply_standard_template(page_rows, db, preferred_template_model)
+            if not page_rows:
+                message = "OCR returned 0 rows"
+                logger.warning("%s on page %d", message, page_num)
+                failed_pages.append(f"page {page_num}: {message}")
+                upload.processed_pages = max(upload.processed_pages or 0, page_num)
+                upload.total_rows = total_rows
+                db.commit()
+                return
+
+            logger.info(
+                "Page %d -> %d rows extracted (sheet_type=%s)",
+                page_num, len(page_rows), result.get("sheet_type", "?"),
+            )
+            page_date = result.get("audit_date")
+            if page_date:
+                last_known_date = page_date
+
+            for row_data in page_rows:
+                if not row_data.get("audit_date") and last_known_date:
+                    row_data["audit_date"] = last_known_date
+                row_data["template_model"] = row_data.get("template_model") or template_model
+                _add_extracted_operation(
+                    db,
+                    str(upload_id),
+                    row_data,
+                    page_num=page_num,
+                    review_image_path=review_image_path,
+                    raw_response=result.get("raw_response", ""),
+                )
+                total_rows += 1
+
+            upload.processed_pages = max(upload.processed_pages or 0, page_num)
+            upload.total_rows = total_rows
+            upload.error_message = f"Completed OCR for page {page_num}; {total_rows} rows saved."
+            db.commit()
+
+        def mark_page_rendered(page_num: int, image_path: str) -> None:
+            upload.processed_pages = max(upload.processed_pages or 0, page_num)
+            upload.error_message = f"Rendered page {page_num}; OCR starting."
+            db.commit()
+            process_page(page_num, image_path)
 
         image_paths = pdf_to_images(
             pdf_path=pdf_path,
@@ -371,86 +434,6 @@ def _process_upload(upload_id: str, pdf_path: str, db_url: str) -> None:
             poppler_path=_pp or None,
             on_page_saved=mark_page_rendered,
         )
-
-        total_rows = 0
-        last_known_date: str | None = None
-        failed_pages: list[str] = []
-
-        preferred_template_model = _template_model_from_filename(upload.original_filename)
-
-        page_count = len(image_paths)
-        workers = min(OCR_PAGE_WORKERS, page_count)
-        upload.error_message = f"Running OCR on {page_count} page(s) with {workers} worker(s)."
-        db.commit()
-
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {
-                executor.submit(_ocr_page_for_upload, str(upload_id), page_num, page_count, image_path): page_num
-                for page_num, image_path in enumerate(image_paths, start=1)
-            }
-
-            for future in as_completed(futures):
-                page_num = futures[future]
-                try:
-                    page_result = future.result()
-                    result = page_result["result"]
-                    review_image_path = page_result["review_image_path"]
-                    logger.info("OCR result keys: %s", list(result.keys()))
-                    logger.info("Error in result: %s", result.get("error"))
-                    logger.info("Rows in result: %d", len(result.get("rows", [])))
-                except Exception as ocr_error:
-                    logger.error("OCR EXCEPTION on page %d: %s", page_num, ocr_error, exc_info=True)
-                    failed_pages.append(f"page {page_num}: {ocr_error}")
-                    upload.processed_pages = max(upload.processed_pages or 0, page_num)
-                    db.commit()
-                    continue
-
-                if result.get("error"):
-                    logger.warning("OCR error on page %d: %s", page_num, result["error"])
-                    failed_pages.append(f"page {page_num}: {result['error']}")
-                    upload.processed_pages = max(upload.processed_pages or 0, page_num)
-                    db.commit()
-                    continue
-
-                page_rows = result.get("rows", [])
-                page_rows, template_model = apply_standard_template(page_rows, db, preferred_template_model)
-                if template_model:
-                    upload.error_message = f"Running OCR using {template_model} template; completed page {page_num}/{page_count}."
-                    db.commit()
-                if not page_rows:
-                    message = "OCR returned 0 rows"
-                    logger.warning("%s on page %d", message, page_num)
-                    failed_pages.append(f"page {page_num}: {message}")
-                    upload.processed_pages = max(upload.processed_pages or 0, page_num)
-                    upload.total_rows = total_rows
-                    db.commit()
-                    continue
-
-                logger.info(
-                    "Page %d -> %d rows extracted (sheet_type=%s)",
-                    page_num, len(page_rows), result.get("sheet_type", "?"),
-                )
-
-                page_date = result.get("audit_date")
-                if page_date:
-                    last_known_date = page_date
-
-                for row_data in page_rows:
-                    if not row_data.get("audit_date") and last_known_date:
-                        row_data["audit_date"] = last_known_date
-                    _add_extracted_operation(
-                        db,
-                        str(upload_id),
-                        row_data,
-                        page_num=page_num,
-                        review_image_path=review_image_path,
-                        raw_response=result.get("raw_response", ""),
-                    )
-                    total_rows += 1
-
-                upload.processed_pages = max(upload.processed_pages or 0, page_num)
-                upload.total_rows = total_rows
-                db.commit()
 
         if failed_pages:
             upload.status = "FAILED"
