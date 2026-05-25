@@ -14,8 +14,8 @@ import logging
 import os
 import queue
 import threading
-import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -51,6 +51,7 @@ ROW_IMAGES_DIR = _backend_path("ROW_IMAGES_DIR", "static/row_images")
 STALE_STARTUP_MINUTES = 5
 STALE_PROCESSING_MINUTES = int(os.getenv("STALE_PROCESSING_MINUTES", "8"))
 OCR_PAGE_TIMEOUT_SECONDS = int(os.getenv("OCR_PAGE_TIMEOUT_SECONDS", "210"))
+OCR_PAGE_WORKERS = max(1, min(4, int(os.getenv("OCR_PAGE_WORKERS", "2"))))
 
 
 def _quantity_from_row_data(row_data: dict) -> int | None:
@@ -99,6 +100,20 @@ def _extract_from_image_with_timeout(image_path: str) -> dict:
     if status == "error":
         raise payload
     return payload
+
+
+def _ocr_page_for_upload(upload_id: str, page_num: int, page_count: int, image_path: str) -> dict:
+    logger.info("=" * 70)
+    logger.info("PROCESSING PAGE %d/%d: %s", page_num, page_count, image_path)
+    logger.info("=" * 70)
+    review_image_path = upload_review_image(image_path, upload_id, page_num) or image_path
+    result = _extract_from_image_with_timeout(image_path)
+    return {
+        "page_num": page_num,
+        "image_path": image_path,
+        "review_image_path": review_image_path,
+        "result": result,
+    }
 
 
 def _page_images_for_upload(upload_id: str) -> dict[int, str]:
@@ -343,83 +358,79 @@ def _process_upload(upload_id: str, pdf_path: str, db_url: str) -> None:
 
         preferred_template_model = _template_model_from_filename(upload.original_filename)
 
-        # Process pages sequentially to avoid rate limits
-        for page_num, image_path in enumerate(image_paths, start=1):
-            upload.error_message = f"Running OCR on page {page_num}/{len(image_paths)}."
-            db.commit()
-            logger.info("=" * 70)
-            logger.info("PROCESSING PAGE %d/%d: %s", page_num, len(image_paths), image_path)
-            logger.info("=" * 70)
-            review_image_path = upload_review_image(image_path, upload_id, page_num) or image_path
+        page_count = len(image_paths)
+        workers = min(OCR_PAGE_WORKERS, page_count)
+        upload.error_message = f"Running OCR on {page_count} page(s) with {workers} worker(s)."
+        db.commit()
 
-            try:
-                result = _extract_from_image_with_timeout(image_path)
-                logger.info("OCR result keys: %s", list(result.keys()))
-                logger.info("Error in result: %s", result.get("error"))
-                logger.info("Rows in result: %d", len(result.get("rows", [])))
-            except Exception as ocr_error:
-                logger.error("OCR EXCEPTION on page %d: %s", page_num, ocr_error, exc_info=True)
-                failed_pages.append(f"page {page_num}: {ocr_error}")
-                # Mark page as processed but continue
-                upload.processed_pages = page_num
-                db.commit()
-                # Wait before retrying next page
-                time.sleep(10)
-                continue
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(_ocr_page_for_upload, str(upload_id), page_num, page_count, image_path): page_num
+                for page_num, image_path in enumerate(image_paths, start=1)
+            }
 
-            if result.get("error"):
-                logger.warning("OCR error on page %d: %s", page_num, result["error"])
-                failed_pages.append(f"page {page_num}: {result['error']}")
-                upload.processed_pages = page_num
-                db.commit()
-                time.sleep(10)
-                continue
+            for future in as_completed(futures):
+                page_num = futures[future]
+                try:
+                    page_result = future.result()
+                    result = page_result["result"]
+                    review_image_path = page_result["review_image_path"]
+                    logger.info("OCR result keys: %s", list(result.keys()))
+                    logger.info("Error in result: %s", result.get("error"))
+                    logger.info("Rows in result: %d", len(result.get("rows", [])))
+                except Exception as ocr_error:
+                    logger.error("OCR EXCEPTION on page %d: %s", page_num, ocr_error, exc_info=True)
+                    failed_pages.append(f"page {page_num}: {ocr_error}")
+                    upload.processed_pages = max(upload.processed_pages or 0, page_num)
+                    db.commit()
+                    continue
 
-            page_rows = result.get("rows", [])
-            page_rows, template_model = apply_standard_template(page_rows, db, preferred_template_model)
-            if template_model:
-                upload.error_message = f"Running OCR on page {page_num}/{len(image_paths)} using {template_model} template."
-                db.commit()
-            if not page_rows:
-                message = "OCR returned 0 rows"
-                logger.warning("%s on page %d", message, page_num)
-                failed_pages.append(f"page {page_num}: {message}")
-                upload.processed_pages = page_num
+                if result.get("error"):
+                    logger.warning("OCR error on page %d: %s", page_num, result["error"])
+                    failed_pages.append(f"page {page_num}: {result['error']}")
+                    upload.processed_pages = max(upload.processed_pages or 0, page_num)
+                    db.commit()
+                    continue
+
+                page_rows = result.get("rows", [])
+                page_rows, template_model = apply_standard_template(page_rows, db, preferred_template_model)
+                if template_model:
+                    upload.error_message = f"Running OCR using {template_model} template; completed page {page_num}/{page_count}."
+                    db.commit()
+                if not page_rows:
+                    message = "OCR returned 0 rows"
+                    logger.warning("%s on page %d", message, page_num)
+                    failed_pages.append(f"page {page_num}: {message}")
+                    upload.processed_pages = max(upload.processed_pages or 0, page_num)
+                    upload.total_rows = total_rows
+                    db.commit()
+                    continue
+
+                logger.info(
+                    "Page %d -> %d rows extracted (sheet_type=%s)",
+                    page_num, len(page_rows), result.get("sheet_type", "?"),
+                )
+
+                page_date = result.get("audit_date")
+                if page_date:
+                    last_known_date = page_date
+
+                for row_data in page_rows:
+                    if not row_data.get("audit_date") and last_known_date:
+                        row_data["audit_date"] = last_known_date
+                    _add_extracted_operation(
+                        db,
+                        str(upload_id),
+                        row_data,
+                        page_num=page_num,
+                        review_image_path=review_image_path,
+                        raw_response=result.get("raw_response", ""),
+                    )
+                    total_rows += 1
+
+                upload.processed_pages = max(upload.processed_pages or 0, page_num)
                 upload.total_rows = total_rows
                 db.commit()
-                time.sleep(10)
-                continue
-
-            logger.info(
-                "Page %d → %d rows extracted (sheet_type=%s)",
-                page_num, len(page_rows), result.get("sheet_type", "?"),
-            )
-
-            page_date = result.get("audit_date")
-            if page_date:
-                last_known_date = page_date
-
-            for row_data in page_rows:
-                if not row_data.get("audit_date") and last_known_date:
-                    row_data["audit_date"] = last_known_date
-                _add_extracted_operation(
-                    db,
-                    str(upload_id),
-                    row_data,
-                    page_num=page_num,
-                    review_image_path=review_image_path,
-                    raw_response=result.get("raw_response", ""),
-                )
-                total_rows += 1
-
-            upload.processed_pages = page_num
-            upload.total_rows = total_rows
-            db.commit()
-            
-            # Wait between pages to avoid rate limits
-            if page_num < len(image_paths):
-                logger.info("Waiting 6 seconds before next page...")
-                time.sleep(6)
 
         if failed_pages:
             upload.status = "FAILED"
