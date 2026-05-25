@@ -275,7 +275,11 @@ def apply_standard_template(
     db: Session,
     preferred_model: str | None = None,
 ) -> tuple[list[dict], str | None]:
-    """Return OCR rows with printed fields overwritten from the template DB."""
+    """Return rows whose printed fields come only from the template DB.
+
+    Handwritten fields still come from OCR. If a row cannot be matched to a
+    template operation, it is not saved as a guessed printed row.
+    """
     if not ocr_rows:
         return ocr_rows, None
 
@@ -297,7 +301,10 @@ def apply_standard_template(
         op = _clean_op(row.get("operation_number"))
         candidates = by_op.get(op or "")
         if not op or not candidates:
-            corrected.append(row)
+            logger.warning(
+                "Dropping OCR row with unmatched printed operation %r; printed fields must come from template.",
+                row.get("operation_number"),
+            )
             index += 1
             continue
 
@@ -326,6 +333,11 @@ def apply_standard_template(
             score_offset += len(template_measurements)
 
             confidence_scores = {**(base.get("confidence_scores") or {})}
+            confidence_scores.update({
+                "operation_number": 1.0,
+                "process_name": 1.0,
+                "quantity": 1.0,
+            })
             if template_measurements:
                 confidence_scores["measurements"] = template_scores or confidence_scores.get("measurements") or []
 
@@ -334,16 +346,17 @@ def apply_standard_template(
             enriched = {
                 **base,
                 "operation_number": template["operation_number"],
-                "process_name": template.get("process_name") or base.get("process_name"),
-                "process_description": template.get("process_name") or base.get("process_description"),
+                "process_name": template.get("process_name"),
+                "process_description": template.get("process_name"),
                 "quantity": quantity,
-                "nominal": nominal if nominal is not None else base.get("nominal"),
-                "upper_limit": upper if upper is not None else base.get("upper_limit"),
-                "lower_limit": lower if lower is not None else base.get("lower_limit"),
+                "nominal": nominal,
+                "upper_limit": upper,
+                "lower_limit": lower,
                 "measurements": template_measurements,
                 "confidence_scores": confidence_scores,
                 "template": template,
                 "template_model": model,
+                "printed_values_source": "standard_template",
             }
             corrected.append(enriched)
 
