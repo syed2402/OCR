@@ -44,3 +44,26 @@ CREATE INDEX IF NOT EXISTS idx_ops_operation_date
 -- Index for review screen queries by upload
 CREATE INDEX IF NOT EXISTS idx_ops_upload
     ON extracted_operations (upload_id, review_status);
+
+-- Printed master data extracted from the standard EBNA/EBDT torque template.
+-- OCR should read handwritten values from uploaded PDFs; these rows supply
+-- stable printed operation/process/quantity/spec values.
+CREATE TABLE IF NOT EXISTS standard_template_rows (
+    id                    SERIAL PRIMARY KEY,
+    model                 VARCHAR(50) NOT NULL,
+    sheet_name            VARCHAR(200),
+    operation_number      VARCHAR(50) NOT NULL,
+    sequence              INTEGER NOT NULL,
+    process_name          TEXT,
+    tightening_equipment  TEXT,
+    tightening_part       TEXT,
+    quantity              INTEGER,
+    tightening_torque     TEXT,
+    engineering_spec      TEXT,
+    checking_equipment    TEXT,
+    source_row            INTEGER,
+    created_at            TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_template_model_op
+    ON standard_template_rows (model, operation_number, sequence);

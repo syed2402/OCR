@@ -42,3 +42,22 @@ class ExtractedOperation(Base):
     gpt4o_raw = Column(JSONB)
     agreement_score = Column(Integer, default=0)
     disagreements = Column(JSONB)
+
+
+class StandardTemplateRow(Base):
+    __tablename__ = "standard_template_rows"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    model = Column(String(50), nullable=False)
+    sheet_name = Column(String(200))
+    operation_number = Column(String(50), nullable=False)
+    sequence = Column(Integer, nullable=False)
+    process_name = Column(Text)
+    tightening_equipment = Column(Text)
+    tightening_part = Column(Text)
+    quantity = Column(Integer)
+    tightening_torque = Column(Text)
+    engineering_spec = Column(Text)
+    checking_equipment = Column(Text)
+    source_row = Column(Integer)
+    created_at = Column(DateTime, server_default=func.now())

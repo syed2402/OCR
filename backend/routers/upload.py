@@ -26,6 +26,7 @@ from models import ExtractedOperation, Upload
 from services.cloud_storage import upload_review_image
 from services.ocr_service import extract_from_image
 from services.pdf_processor import pdf_to_images, resolve_poppler_path
+from services.standard_template import apply_standard_template
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -66,6 +67,17 @@ def _machine_values_for_quantity(row_data: dict, quantity: int | None) -> list[f
         except (TypeError, ValueError):
             logger.warning("Dropping non-numeric machine value for op %s: %r", row_data.get("operation_number"), value)
     return values
+
+
+def _template_model_from_filename(filename: str | None) -> str | None:
+    if not filename:
+        return None
+    upper = filename.upper()
+    if "EBDT" in upper:
+        return "EBDT"
+    if "EBNA" in upper:
+        return "EBNA"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +128,8 @@ def _process_upload(upload_id: str, pdf_path: str, db_url: str) -> None:
         last_known_date: str | None = None
         failed_pages: list[str] = []
 
+        preferred_template_model = _template_model_from_filename(upload.original_filename)
+
         # Process pages sequentially to avoid rate limits
         for page_num, image_path in enumerate(image_paths, start=1):
             upload.error_message = f"Running OCR on page {page_num}/{len(image_paths)}."
@@ -149,6 +163,10 @@ def _process_upload(upload_id: str, pdf_path: str, db_url: str) -> None:
                 continue
 
             page_rows = result.get("rows", [])
+            page_rows, template_model = apply_standard_template(page_rows, db, preferred_template_model)
+            if template_model:
+                upload.error_message = f"Running OCR on page {page_num}/{len(image_paths)} using {template_model} template."
+                db.commit()
             if not page_rows:
                 message = "OCR returned 0 rows"
                 logger.warning("%s on page %d", message, page_num)
@@ -179,6 +197,7 @@ def _process_upload(upload_id: str, pdf_path: str, db_url: str) -> None:
                     except ValueError:
                         pass
 
+                raw_row_data = {**row_data}
                 op = ExtractedOperation(
                     upload_id=upload_id,
                     audit_date=audit_date,
@@ -191,7 +210,9 @@ def _process_upload(upload_id: str, pdf_path: str, db_url: str) -> None:
                     raw_ocr_json={
                         "page": page_num,
                         "raw_response": result.get("raw_response", "")[:4000],
-                        "row_data": row_data,
+                        "row_data": raw_row_data,
+                        "template": row_data.get("template"),
+                        "template_model": row_data.get("template_model"),
                         "confidence_scores": row_data.get("confidence_scores") or {},
                         "unclear_fields": row_data.get("unclear_fields") or [],
                     },
@@ -417,7 +438,10 @@ def _retry_page_background(upload_id: str, page_num: int, image_path: str, db_ur
             if row and row.audit_date:
                 page_date = row.audit_date.isoformat()
 
+        upload = db.query(Upload).filter(Upload.id == upload_id).first()
+        preferred_template_model = _template_model_from_filename(upload.original_filename if upload else None)
         retry_rows = result.get("rows", [])
+        retry_rows, template_model = apply_standard_template(retry_rows, db, preferred_template_model)
         if not retry_rows:
             logger.warning("Retry page %d returned 0 rows for upload %s", page_num, upload_id)
             return
@@ -447,6 +471,7 @@ def _retry_page_background(upload_id: str, page_num: int, image_path: str, db_ur
                 except ValueError:
                     pass
 
+            raw_row_data = {**row_data}
             op = ExtractedOperation(
                 upload_id=upload_id,
                 audit_date=audit_date,
@@ -459,7 +484,9 @@ def _retry_page_background(upload_id: str, page_num: int, image_path: str, db_ur
                 raw_ocr_json={
                     "page": page_num,
                     "raw_response": result.get("raw_response", "")[:4000],
-                    "row_data": row_data,
+                    "row_data": raw_row_data,
+                    "template": row_data.get("template"),
+                    "template_model": row_data.get("template_model") or template_model,
                     "confidence_scores": row_data.get("confidence_scores") or {},
                     "unclear_fields": row_data.get("unclear_fields") or [],
                 },

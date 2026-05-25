@@ -88,6 +88,21 @@ Empty result: []"""
 
 
 @lru_cache(maxsize=1)
+def _template_context() -> str:
+    try:
+        from services.standard_template import template_prompt_context
+        return template_prompt_context()
+    except Exception as exc:
+        logger.warning("Could not load standard template context for OCR prompt: %s", exc)
+        return ""
+
+
+def _extraction_prompt() -> str:
+    context = _template_context()
+    return f"{_EXTRACTION_PROMPT}\n\n{context}" if context else _EXTRACTION_PROMPT
+
+
+@lru_cache(maxsize=1)
 def _get_client() -> google_genai.Client:
     return google_genai.Client(api_key=os.getenv("GEMINI_API_KEY", ""))
 
@@ -365,7 +380,7 @@ def _merge_continuation_rows(rows: list[dict]) -> list[dict]:
 def extract_page(image_path: str, audit_date: Optional[str] = None) -> list[dict]:
     logger.info("extract_page: %s", image_path)
     pil_image = Image.open(image_path).convert("RGB")
-    raw = _call_gemini(_EXTRACTION_PROMPT, pil_image)
+    raw = _call_gemini(_extraction_prompt(), pil_image)
     items = parse_gemini_response(raw)
     rows = _merge_continuation_rows([_normalise_row(r, audit_date) for r in items])
 

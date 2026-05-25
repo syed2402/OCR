@@ -18,6 +18,7 @@ load_dotenv(ENV_PATH, override=True)
 from database import init_db
 from routers import analytics, review, upload
 from services.pdf_processor import resolve_poppler_path
+from services.standard_template import seed_standard_templates
 
 # Add poppler to process PATH so pdf2image can find pdfinfo + pdftoppm
 # regardless of which thread calls it.
@@ -90,6 +91,15 @@ app.include_router(analytics.router, tags=["Analytics"])
 def on_startup():
     logger.info("Initialising database schema…")
     init_db()
+    try:
+        from database import SessionLocal
+        db = SessionLocal()
+        try:
+            seed_standard_templates(db)
+        finally:
+            db.close()
+    except Exception:
+        logger.exception("Standard template seed failed")
     logger.info("Ready.")
 
 
