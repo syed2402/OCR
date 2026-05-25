@@ -496,6 +496,70 @@ def _fill_template_gaps(corrected: list[dict], template_rows: list[dict], model:
     return filled
 
 
+def _fill_template_span(corrected: list[dict], template_rows: list[dict], model: str) -> list[dict]:
+    """Fill every missing printed template row inside the detected sheet span."""
+    if not corrected:
+        return corrected
+
+    model_templates = [
+        row for row in template_rows
+        if row.get("model") == model and row.get("source_row") is not None
+    ]
+    by_sheet: dict[str, list[dict]] = {}
+    for template in model_templates:
+        by_sheet.setdefault(template.get("sheet_name"), []).append(template)
+    for sheet_rows in by_sheet.values():
+        sheet_rows.sort(key=lambda row: (row.get("source_row") or 0, row.get("sequence") or 0))
+
+    rows_by_sheet: dict[str, list[dict]] = {}
+    for row in corrected:
+        template = row.get("template") or {}
+        sheet_name = template.get("sheet_name")
+        source_row = template.get("source_row")
+        if sheet_name and isinstance(source_row, int):
+            rows_by_sheet.setdefault(sheet_name, []).append(row)
+
+    additions: list[dict] = []
+    existing_keys = {_template_key(row.get("template")) for row in corrected}
+    for sheet_name, sheet_rows in rows_by_sheet.items():
+        detected_source_rows = [
+            row.get("template", {}).get("source_row")
+            for row in sheet_rows
+            if isinstance(row.get("template", {}).get("source_row"), int)
+        ]
+        if not detected_source_rows:
+            continue
+        start_row = min(detected_source_rows)
+        end_row = max(detected_source_rows)
+        base = sheet_rows[0]
+        for template in by_sheet.get(sheet_name, []):
+            source_row = template.get("source_row")
+            key = _template_key(template)
+            if start_row <= source_row <= end_row and key not in existing_keys:
+                logger.info(
+                    "Filling missing printed template row %s seq %s inside source row span %s-%s",
+                    template.get("operation_number"),
+                    template.get("sequence"),
+                    start_row,
+                    end_row,
+                )
+                additions.append(_template_enriched_row(template, base, model))
+                existing_keys.add(key)
+
+    if not additions:
+        return corrected
+    combined = [*corrected, *additions]
+    return sorted(
+        combined,
+        key=lambda row: (
+            (row.get("template") or {}).get("sheet_name") or "",
+            (row.get("template") or {}).get("source_row") or 0,
+            (row.get("template") or {}).get("sequence") or 0,
+            row.get("id") or 0,
+        ),
+    )
+
+
 def apply_standard_template(
     ocr_rows: list[dict],
     db: Session,
@@ -582,4 +646,6 @@ def apply_standard_template(
             enriched["confidence_scores"] = confidence_scores
             corrected.append(enriched)
 
-    return _fill_template_gaps(corrected, template_rows, model), model
+    corrected = _fill_template_gaps(corrected, template_rows, model)
+    corrected = _fill_template_span(corrected, template_rows, model)
+    return corrected, model
