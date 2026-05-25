@@ -23,8 +23,9 @@ logger = logging.getLogger(__name__)
 
 GEMINI_MODEL = "gemini-2.5-flash"
 # Cap longest side — keeps handwriting readable, cuts API upload time
-MAX_IMAGE_PX = 3200
-GEMINI_TIMEOUT_MS = 120_000
+MAX_IMAGE_PX = int(os.getenv("GEMINI_MAX_IMAGE_PX", "3000"))
+GEMINI_TIMEOUT_MS = int(os.getenv("GEMINI_TIMEOUT_MS", "60000"))
+GEMINI_MAX_ATTEMPTS = max(1, min(3, int(os.getenv("GEMINI_MAX_ATTEMPTS", "1"))))
 
 _EXTRACTION_PROMPT = """Extract ALL data rows from this Stellantis TORQUE AUDIT SHEET.
 
@@ -122,7 +123,7 @@ def _call_gemini(prompt: str, pil_image: Image.Image) -> str:
     client = _get_client()
     pil_image = _prepare_for_api(pil_image)
 
-    for attempt in range(1, 4):
+    for attempt in range(1, GEMINI_MAX_ATTEMPTS + 1):
         try:
             resp = client.models.generate_content(
                 model=GEMINI_MODEL,
@@ -153,11 +154,11 @@ def _call_gemini(prompt: str, pil_image: Image.Image) -> str:
             err = str(exc)
             if "429" in err or "RESOURCE_EXHAUSTED" in err:
                 m = re.search(r"retry in (\d+(?:\.\d+)?)s", err)
-                wait = min(float(m.group(1)) + 3 if m else 20, 25)
+                wait = min(float(m.group(1)) + 2 if m else 8, 12)
                 logger.warning("Gemini rate-limited — waiting %.0fs (attempt %d)", wait, attempt)
                 time.sleep(wait)
             elif any(c in err for c in ("503", "500", "overloaded")):
-                time.sleep(10 * attempt)
+                time.sleep(4 * attempt)
             else:
                 raise
     raise RuntimeError("Gemini: all retries exhausted")
