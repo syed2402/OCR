@@ -8,6 +8,7 @@ values are corrected from these template rows before saving.
 from __future__ import annotations
 
 import logging
+import json
 import os
 import re
 from functools import lru_cache
@@ -23,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_TEMPLATE_PATH = BACKEND_DIR / "data" / "standard_torque_template.xlsx"
+DEFAULT_RULES_PATH = BACKEND_DIR / "data" / "template_rules.json"
 
 TORQUE_SHEETS = {
     "Torque Audit Sheet - EBNA": {
@@ -51,12 +53,41 @@ TORQUE_SHEETS = {
 
 
 def _excluded_ops() -> set[str]:
-    raw = os.getenv("EXCLUDED_TEMPLATE_OPS", "1360")
-    return {re.sub(r"\D", "", item) for item in re.split(r"[,;\s]+", raw) if re.sub(r"\D", "", item)}
+    rules = _template_rules()
+    configured = rules.get("excluded_ops") or []
+    env_raw = os.getenv("EXCLUDED_TEMPLATE_OPS")
+    env_values = re.split(r"[,;\s]+", env_raw) if env_raw else []
+    values = [*configured, *env_values]
+    return {re.sub(r"\D", "", str(item)) for item in values if re.sub(r"\D", "", str(item))}
 
 
 def default_template_model() -> str:
-    return os.getenv("DEFAULT_TEMPLATE_MODEL", "EBDT").upper()
+    return os.getenv("DEFAULT_TEMPLATE_MODEL", str(_template_rules().get("default_model") or "EBDT")).upper()
+
+
+@lru_cache(maxsize=1)
+def _template_rules() -> dict:
+    configured = os.getenv("STANDARD_TEMPLATE_RULES_JSON")
+    path = Path(configured).resolve() if configured else DEFAULT_RULES_PATH
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("Could not read standard template rules from %s: %s", path, exc)
+        return {}
+
+
+def _quantity_override(model: str, operation_number: str, sequence: int) -> int | None:
+    rules = _template_rules().get("quantity_overrides") or {}
+    model_rules = rules.get(model) or rules.get(model.upper()) or {}
+    values = model_rules.get(operation_number) or model_rules.get(str(operation_number))
+    if not isinstance(values, list) or sequence < 1 or sequence > len(values):
+        return None
+    try:
+        return max(0, int(float(values[sequence - 1])))
+    except (TypeError, ValueError):
+        return None
 
 
 def _clean_text(value) -> str | None:
@@ -145,6 +176,9 @@ def _extract_rows_from_workbook(path: Path) -> list[dict]:
                 "checking_equipment": _clean_text(sheet.cell(row_num, spec["checking_equipment"]).value),
                 "source_row": row_num,
             }
+            override_quantity = _quantity_override(row["model"], current_op, row["sequence"])
+            if override_quantity is not None:
+                row["quantity"] = override_quantity
             if any(row.get(k) for k in ("process_name", "tightening_torque", "engineering_spec")):
                 sequence_by_op[current_op] = row["sequence"]
                 extracted.append(row)

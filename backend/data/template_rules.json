@@ -1,0 +1,9 @@
+{
+  "default_model": "EBDT",
+  "excluded_ops": ["1360"],
+  "quantity_overrides": {
+    "EBDT": {
+      "1900": [1, 1, 2]
+    }
+  }
+}
