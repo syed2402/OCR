@@ -80,6 +80,76 @@ def _template_model_from_filename(filename: str | None) -> str | None:
     return default_template_model()
 
 
+def _parse_audit_date(raw_date) -> date | None:
+    if isinstance(raw_date, datetime):
+        return raw_date.date()
+    if isinstance(raw_date, date):
+        return raw_date
+    if not raw_date:
+        return None
+    try:
+        return datetime.strptime(str(raw_date), "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _saved_operation_to_row_data(row: ExtractedOperation) -> dict:
+    raw = row.raw_ocr_json or {}
+    row_data = dict(raw.get("row_data") or {})
+    row_data.update({
+        "operation_number": row.operation_number,
+        "engine_number": row.engine_number,
+        "process_name": row.process_name,
+        "quantity": row.quantity,
+        "measurements": row.measurements_json or [],
+        "judgement": row.judgement,
+        "audit_date": row.audit_date.isoformat() if row.audit_date else row_data.get("audit_date"),
+        "page": raw.get("page") or row_data.get("page"),
+        "raw_response": raw.get("raw_response", ""),
+        "row_image_path": row.row_image_path,
+    })
+    return row_data
+
+
+def _add_extracted_operation(
+    db: Session,
+    upload_id: str,
+    row_data: dict,
+    page_num: int | None = None,
+    review_image_path: str | None = None,
+    raw_response: str = "",
+) -> ExtractedOperation:
+    quantity = _quantity_from_row_data(row_data)
+    measurements = _machine_values_for_quantity(row_data, quantity)
+    audit_date = _parse_audit_date(row_data.get("audit_date"))
+    raw_row_data = {**row_data}
+    op = ExtractedOperation(
+        upload_id=upload_id,
+        audit_date=audit_date,
+        operation_number=row_data.get("operation_number"),
+        engine_number=row_data.get("engine_number"),
+        process_name=row_data.get("process_name"),
+        judgement=row_data.get("judgement"),
+        quantity=quantity,
+        measurements_json=measurements,
+        raw_ocr_json={
+            "page": page_num or row_data.get("page"),
+            "raw_response": (raw_response or row_data.get("raw_response") or "")[:4000],
+            "row_data": raw_row_data,
+            "template": row_data.get("template"),
+            "template_model": row_data.get("template_model"),
+            "printed_values_source": row_data.get("printed_values_source"),
+            "confidence_scores": row_data.get("confidence_scores") or {},
+            "unclear_fields": row_data.get("unclear_fields") or [],
+        },
+        corrected_json=None,
+        review_status="EXTRACTED",
+        row_image_path=review_image_path or row_data.get("row_image_path"),
+    )
+    db.add(op)
+    return op
+
+
 # ---------------------------------------------------------------------------
 # Background processing
 # ---------------------------------------------------------------------------
@@ -191,41 +261,16 @@ def _process_upload(upload_id: str, pdf_path: str, db_url: str) -> None:
                 last_known_date = page_date
 
             for row_data in page_rows:
-                quantity = _quantity_from_row_data(row_data)
-                measurements = _machine_values_for_quantity(row_data, quantity)
-                audit_date = None
-                raw_date = row_data.get("audit_date") or last_known_date
-                if raw_date:
-                    try:
-                        audit_date = datetime.strptime(raw_date, "%Y-%m-%d").date()
-                    except ValueError:
-                        pass
-
-                raw_row_data = {**row_data}
-                op = ExtractedOperation(
-                    upload_id=upload_id,
-                    audit_date=audit_date,
-                    operation_number=row_data.get("operation_number"),
-                    engine_number=row_data.get("engine_number"),
-                    process_name=row_data.get("process_name"),
-                    judgement=row_data.get("judgement"),
-                    quantity=quantity,
-                    measurements_json=measurements,
-                    raw_ocr_json={
-                        "page": page_num,
-                        "raw_response": result.get("raw_response", "")[:4000],
-                        "row_data": raw_row_data,
-                        "template": row_data.get("template"),
-                        "template_model": row_data.get("template_model"),
-                        "printed_values_source": row_data.get("printed_values_source"),
-                        "confidence_scores": row_data.get("confidence_scores") or {},
-                        "unclear_fields": row_data.get("unclear_fields") or [],
-                    },
-                    corrected_json=None,
-                    review_status="EXTRACTED",
-                    row_image_path=review_image_path,
+                if not row_data.get("audit_date") and last_known_date:
+                    row_data["audit_date"] = last_known_date
+                _add_extracted_operation(
+                    db,
+                    str(upload_id),
+                    row_data,
+                    page_num=page_num,
+                    review_image_path=review_image_path,
+                    raw_response=result.get("raw_response", ""),
                 )
-                db.add(op)
                 total_rows += 1
 
             upload.processed_pages = page_num
@@ -348,6 +393,47 @@ def get_upload_status(upload_id: str, db: Session = Depends(get_db)):
     }
 
 
+@router.post("/uploads/{upload_id}/reapply-template")
+def reapply_template(upload_id: str, db: Session = Depends(get_db)):
+    """Repair saved rows from the standard template without running OCR again."""
+    upload = db.query(Upload).filter(Upload.id == upload_id).first()
+    if not upload:
+        raise HTTPException(status_code=404, detail="Upload not found")
+
+    existing_rows = (
+        db.query(ExtractedOperation)
+        .filter(ExtractedOperation.upload_id == upload_id)
+        .order_by(ExtractedOperation.id)
+        .all()
+    )
+    if not existing_rows:
+        raise HTTPException(status_code=400, detail="No extracted rows found for this upload")
+
+    seed_standard_templates(db, force=True)
+    row_data = [_saved_operation_to_row_data(row) for row in existing_rows]
+    preferred_template_model = _template_model_from_filename(upload.original_filename)
+    repaired_rows, template_model = apply_standard_template(row_data, db, preferred_template_model)
+    if not repaired_rows:
+        raise HTTPException(status_code=400, detail="Template reapply produced no rows")
+
+    db.query(ExtractedOperation).filter(ExtractedOperation.upload_id == upload_id).delete(synchronize_session=False)
+    for row in repaired_rows:
+        _add_extracted_operation(db, upload_id, row)
+
+    upload.total_rows = len(repaired_rows)
+    upload.status = "COMPLETED"
+    upload.error_message = f"Reapplied {template_model or 'standard'} template without OCR."
+    upload.completed_at = datetime.utcnow()
+    db.commit()
+
+    return {
+        "status": "success",
+        "upload_id": upload_id,
+        "template_model": template_model,
+        "total_rows": upload.total_rows,
+    }
+
+
 @router.get("/uploads/{upload_id}/pages")
 def get_upload_pages(upload_id: str, db: Session = Depends(get_db)):
     """
@@ -467,41 +553,17 @@ def _retry_page_background(upload_id: str, page_num: int, image_path: str, db_ur
 
         rows_added = 0
         for row_data in retry_rows:
-            quantity = _quantity_from_row_data(row_data)
-            measurements = _machine_values_for_quantity(row_data, quantity)
-            audit_date = None
-            raw_date = row_data.get("audit_date") or page_date
-            if raw_date:
-                try:
-                    audit_date = datetime.strptime(raw_date, "%Y-%m-%d").date()
-                except ValueError:
-                    pass
-
-            raw_row_data = {**row_data}
-            op = ExtractedOperation(
-                upload_id=upload_id,
-                audit_date=audit_date,
-                operation_number=row_data.get("operation_number"),
-                engine_number=row_data.get("engine_number"),
-                process_name=row_data.get("process_name"),
-                judgement=row_data.get("judgement"),
-                quantity=quantity,
-                measurements_json=measurements,
-                raw_ocr_json={
-                    "page": page_num,
-                    "raw_response": result.get("raw_response", "")[:4000],
-                    "row_data": raw_row_data,
-                    "template": row_data.get("template"),
-                    "template_model": row_data.get("template_model") or template_model,
-                    "printed_values_source": row_data.get("printed_values_source"),
-                    "confidence_scores": row_data.get("confidence_scores") or {},
-                    "unclear_fields": row_data.get("unclear_fields") or [],
-                },
-                corrected_json=None,
-                review_status="EXTRACTED",
-                row_image_path=review_image_path,
+            if not row_data.get("audit_date") and page_date:
+                row_data["audit_date"] = page_date
+            row_data["template_model"] = row_data.get("template_model") or template_model
+            _add_extracted_operation(
+                db,
+                upload_id,
+                row_data,
+                page_num=page_num,
+                review_image_path=review_image_path,
+                raw_response=result.get("raw_response", ""),
             )
-            db.add(op)
             rows_added += 1
 
         # Update upload totals
