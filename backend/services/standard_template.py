@@ -339,15 +339,31 @@ def _parse_limits(text: str | None) -> tuple[float | None, float | None, float |
     if not text:
         return None, None, None
     normalized = text.replace(",", ".")
-    range_matches = re.findall(r"(-?\d+(?:\.\d+)?)\s*(?:~|-|to)\s*(-?\d+(?:\.\d+)?)", normalized, flags=re.I)
+    range_matches = re.findall(
+        r"(-?\d+(?:\.\d+)?)\s*(?:nm|kg|kn|c|°c|deg|degree|degrees)?\s*(?:~|–|—|-|to)\s*"
+        r"(-?\d+(?:\.\d+)?)\s*(?:nm|kg|kn|c|°c|deg|degree|degrees)?",
+        normalized,
+        flags=re.I,
+    )
     lower = upper = None
     if range_matches:
         a, b = range_matches[-1]
         first, second = float(a), float(b)
         lower, upper = min(first, second), max(first, second)
 
-    torque_match = re.search(r"(?:torque|final tight|final torque)\s*:?\s*(-?\d+(?:\.\d+)?)", normalized, flags=re.I)
-    nominal = float(torque_match.group(1)) if torque_match else None
+    torque_matches = re.findall(
+        r"(?:final\s+torque|final|torque|final\s+tight)\s*:?\s*(-?\d+(?:\.\d+)?)",
+        normalized,
+        flags=re.I,
+    )
+    torque_match = torque_matches[-1] if torque_matches else None
+    nominal = float(torque_match) if torque_match else None
+    if nominal is not None and (lower is None or upper is None):
+        tolerance_match = re.search(r"(?:\+/-|±)\s*(\d+(?:\.\d+)?)\s*%", normalized, flags=re.I)
+        if tolerance_match:
+            tolerance = float(tolerance_match.group(1)) / 100
+            lower = nominal * (1 - tolerance)
+            upper = nominal * (1 + tolerance)
     if nominal is None:
         first_number = re.search(r"-?\d+(?:\.\d+)?", normalized)
         nominal = float(first_number.group(0)) if first_number else None
