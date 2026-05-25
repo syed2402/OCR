@@ -130,7 +130,14 @@ def _reconcile_stale_processing_upload(
     background_tasks: BackgroundTasks | None = None,
 ) -> bool:
     """Recover Render uploads when the in-process background task stops mid-run."""
-    if upload.status != "PROCESSING" or not upload.created_at:
+    resumable_failed = (
+        upload.status == "FAILED"
+        and upload.error_message
+        and "Missing page(s)" in upload.error_message
+    )
+    if upload.status != "PROCESSING" and not resumable_failed:
+        return False
+    if not upload.created_at:
         return False
 
     row_count, latest_row_at = (
@@ -146,9 +153,11 @@ def _reconcile_stale_processing_upload(
         upload.total_rows = row_count
         changed = True
 
+    page_images = _page_images_for_upload(str(upload.id))
     if (
         row_count == 0
         and (upload.processed_pages or 0) == 0
+        and not page_images
         and now - upload.created_at > timedelta(minutes=STALE_STARTUP_MINUTES)
     ):
         upload.status = "FAILED"
@@ -163,9 +172,8 @@ def _reconcile_stale_processing_upload(
     if now - last_progress_at <= timedelta(minutes=STALE_PROCESSING_MINUTES):
         return changed
 
-    page_images = _page_images_for_upload(str(upload.id))
     missing_pages = sorted(set(page_images) - _pages_with_rows(db, str(upload.id)))
-    if row_count > 0 and missing_pages and background_tasks is not None:
+    if missing_pages and background_tasks is not None:
         if upload.completed_at and now - upload.completed_at <= timedelta(minutes=STALE_PROCESSING_MINUTES):
             return changed
         db_url = os.getenv(
@@ -173,6 +181,7 @@ def _reconcile_stale_processing_upload(
             "postgresql://quality_user:quality_pass@localhost:5432/stellantis_quality",
         )
         background_tasks.add_task(_resume_missing_pages_background, str(upload.id), missing_pages, db_url)
+        upload.status = "PROCESSING"
         upload.error_message = (
             "Render worker paused; resuming OCR for missing page(s): "
             + ", ".join(map(str, missing_pages))
