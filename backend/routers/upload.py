@@ -607,7 +607,7 @@ def get_upload_pages(upload_id: str, db: Session = Depends(get_db)):
     for row in result:
         rows_per_page[row.p] = row.cnt
 
-    pages = []
+    pages_by_number: dict[int, dict] = {}
     for img_path in image_files:
         fname = os.path.basename(img_path)
         # filename format: {upload_id}_page_001.png
@@ -615,13 +615,20 @@ def get_upload_pages(upload_id: str, db: Session = Depends(get_db)):
             page_num = int(fname.split("_page_")[1].split(".")[0])
         except (IndexError, ValueError):
             continue
-        pages.append({
+        pages_by_number[page_num] = {
             "page": page_num,
             "row_count": rows_per_page.get(page_num, 0),
             "image_path": img_path,
+        }
+
+    for page_num, row_count in rows_per_page.items():
+        pages_by_number.setdefault(page_num, {
+            "page": page_num,
+            "row_count": row_count,
+            "image_path": "",
         })
 
-    return pages
+    return [pages_by_number[page_num] for page_num in sorted(pages_by_number)]
 
 
 @router.get("/uploads/{upload_id}/file")
