@@ -102,8 +102,21 @@ def _clean_op(value) -> str | None:
     text = _clean_text(value)
     if not text:
         return None
-    digits = re.sub(r"\D", "", text)
-    return digits or None
+    parts = re.findall(r"\d+", text)
+    if len(parts) == 1 and len(parts[0]) > 4 and len(parts[0]) % 4 == 0:
+        parts = [parts[0][index: index + 4] for index in range(0, len(parts[0]), 4)]
+    return "&".join(parts) if parts else None
+
+
+def _op_aliases(operation_number: str | None) -> set[str]:
+    op = _clean_op(operation_number)
+    if not op:
+        return set()
+    parts = op.split("&")
+    aliases = {op, "".join(parts)}
+    if len(parts) > 1:
+        aliases.update(parts)
+    return {alias for alias in aliases if alias}
 
 
 def _clean_quantity(value) -> int | None:
@@ -332,18 +345,28 @@ def apply_standard_template(
         return [], None
 
     by_op: dict[str, list[dict]] = {}
+    op_alias_to_template_op: dict[str, str] = {}
     for template in template_rows:
         if template["model"] != model:
             continue
-        by_op.setdefault(template["operation_number"], []).append(template)
+        template_op = template["operation_number"]
+        by_op.setdefault(template_op, []).append(template)
+        for alias in _op_aliases(template_op):
+            op_alias_to_template_op.setdefault(alias, template_op)
+
+    def resolve_template_op(value) -> str | None:
+        op = _clean_op(value)
+        if not op:
+            return None
+        return op if op in by_op else op_alias_to_template_op.get(op)
 
     corrected: list[dict] = []
     index = 0
     while index < len(ocr_rows):
         row = ocr_rows[index]
-        op = _clean_op(row.get("operation_number"))
-        candidates = by_op.get(op or "")
-        if not op or not candidates:
+        template_op = resolve_template_op(row.get("operation_number"))
+        candidates = by_op.get(template_op or "")
+        if not template_op or not candidates:
             logger.warning(
                 "Dropping OCR row with unmatched printed operation %r; printed fields must come from template.",
                 row.get("operation_number"),
@@ -353,7 +376,7 @@ def apply_standard_template(
 
         group = [row]
         index += 1
-        while index < len(ocr_rows) and _clean_op(ocr_rows[index].get("operation_number")) == op:
+        while index < len(ocr_rows) and resolve_template_op(ocr_rows[index].get("operation_number")) == template_op:
             group.append(ocr_rows[index])
             index += 1
 
