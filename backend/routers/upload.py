@@ -53,7 +53,7 @@ STALE_STARTUP_MINUTES = 5
 STALE_PROCESSING_MINUTES = int(os.getenv("STALE_PROCESSING_MINUTES", "8"))
 OCR_PAGE_TIMEOUT_SECONDS = int(os.getenv("OCR_PAGE_TIMEOUT_SECONDS", "75"))
 OCR_PAGE_RETRIES = max(1, min(3, int(os.getenv("OCR_PAGE_RETRIES", "2"))))
-OCR_WORKERS = max(1, min(4, int(os.getenv("OCR_WORKERS", "2"))))
+OCR_WORKERS = max(1, min(4, int(os.getenv("OCR_WORKERS", "1"))))
 UPLOAD_REVIEW_IMAGES_DURING_OCR = os.getenv("UPLOAD_REVIEW_IMAGES_DURING_OCR", "false").lower() in {"1", "true", "yes"}
 
 

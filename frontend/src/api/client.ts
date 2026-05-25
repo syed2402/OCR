@@ -9,14 +9,10 @@ const API_BASE =
   (import.meta.env.DEV ? '/api' : '')
 
 const BASE = API_BASE.replace(/\/$/, '')
-const NGROK_SKIP_HEADER: Record<string, string> = BASE.includes('ngrok-free.app')
-  ? { 'ngrok-skip-browser-warning': 'true' }
-  : {}
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const headers = new Headers(options?.headers)
   if (options?.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
-  Object.entries(NGROK_SKIP_HEADER).forEach(([key, value]) => headers.set(key, value))
   const res = await fetch(`${BASE}${path}`, {
     headers,
     ...options,
@@ -140,7 +136,7 @@ export interface ReviewPayload {
 export async function uploadPdf(file: File): Promise<{ upload_id: string; filename: string }> {
   const fd = new FormData()
   fd.append('file', file)
-  const res = await fetch(`${BASE}/upload`, { method: 'POST', headers: NGROK_SKIP_HEADER, body: fd })
+  const res = await fetch(`${BASE}/upload`, { method: 'POST', body: fd })
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }))
     throw new Error(err.detail ?? `HTTP ${res.status}`)
