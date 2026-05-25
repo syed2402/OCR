@@ -52,7 +52,7 @@ import {
   listUploads,
   rejectRow,
   reviewRow,
-  rowImageUrl,
+  rowSourceImageUrl,
   isRowCrop,
   uploadFileUrl,
   ExtractedRow,
@@ -1476,9 +1476,9 @@ export default function ReviewPage() {
           <div className="flex flex-col gap-2 bg-slate-900 px-3 py-2 text-white sm:flex-row sm:items-center sm:justify-between">
             <div>
               <span className="font-mono text-xs">#{idx + 1} · page {row?.page ?? '?'} · row {idx + 1}</span>
-              {row?.row_image_path && (
+              {row && (row.row_image_path || row.page) && (
                 <p className="mt-0.5 text-[10px] font-medium uppercase tracking-wide text-blue-200">
-                  {isRowCrop(row.row_image_path) ? 'Selected row crop' : 'Selected page image'}
+                  {row.row_image_path && isRowCrop(row.row_image_path) ? 'Selected row crop' : 'Selected page image'}
                 </p>
               )}
             </div>
@@ -1498,10 +1498,10 @@ export default function ReviewPage() {
             onPointerCancel={stopImagePan}
             onWheel={handleImageWheel}
           >
-            {row?.row_image_path ? (
+            {row && (row.row_image_path || row.page) ? (
               <img
-                key={`${row.id}-${row.row_image_path}`}
-                src={rowImageUrl(row.row_image_path)}
+                key={`${row.id}-${row.page}-${row.row_image_path ?? ''}`}
+                src={rowSourceImageUrl(row)}
                 alt={`Row ${idx + 1} source image`}
                 draggable={false}
                 className="max-h-[92%] max-w-[92%] rounded-sm bg-white shadow-lg ring-2 ring-blue-500/60 transition-transform duration-100 ease-out"
@@ -1514,7 +1514,7 @@ export default function ReviewPage() {
             ) : (
               <div className="mt-20 text-center text-sm text-slate-500">No image available</div>
             )}
-            {row?.row_image_path && (
+            {row && (row.row_image_path || row.page) && (
               <div
                 className="absolute bottom-3 left-1/2 flex max-w-[calc(100%-24px)] -translate-x-1/2 items-center gap-2 overflow-x-auto rounded-md bg-slate-950/90 px-3 py-2 text-white shadow-xl backdrop-blur"
                 onPointerDown={(event) => event.stopPropagation()}
@@ -1606,9 +1606,9 @@ export default function ReviewPage() {
             {row && <StatusBadge status={row.review_status} />}
           </div>
           <div className="flex-1 overflow-auto p-3 flex items-start justify-center">
-            {row?.row_image_path ? (
+            {row && (row.row_image_path || row.page) ? (
               <img
-                src={rowImageUrl(row.row_image_path)}
+                src={rowSourceImageUrl(row)}
                 alt={`Row ${idx + 1} source image`}
                 className="w-full rounded shadow-md bg-white"
                 style={{ imageRendering: 'crisp-edges' }}

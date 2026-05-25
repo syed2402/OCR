@@ -4,7 +4,7 @@
  * (The full editable version lives in ReviewPage.)
  */
 
-import { ExtractedRow, rowImageUrl } from '../api/client'
+import { ExtractedRow, rowSourceImageUrl } from '../api/client'
 
 interface Props {
   row: ExtractedRow
@@ -15,9 +15,9 @@ export default function RowReviewCard({ row }: Props) {
     <div className="flex gap-4">
       {/* Image */}
       <div className="w-1/2 bg-gray-100 rounded-lg overflow-hidden flex items-center justify-center min-h-32">
-        {row.row_image_path ? (
+        {row.row_image_path || row.page ? (
           <img
-            src={rowImageUrl(row.row_image_path)}
+            src={rowSourceImageUrl(row)}
             alt="Row source"
             className="max-w-full max-h-48 object-contain"
           />

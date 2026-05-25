@@ -232,6 +232,14 @@ export function rowImageUrl(imagePath: string): string {
   return `${BASE}/static/row_images/${filename}`
 }
 
+export function rowSourceImageUrl(row: ExtractedRow): string {
+  if (row.upload_id && row.page) {
+    return `${BASE}/uploads/${row.upload_id}/page-image/${row.page}`
+  }
+  if (row.row_image_path) return rowImageUrl(row.row_image_path)
+  return ''
+}
+
 export function isRowCrop(imagePath: string): boolean {
   // Cropped paths contain "_row_" in the filename; full-page paths don't
   return imagePath.includes('_row_')

@@ -16,11 +16,12 @@ import queue
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
@@ -52,6 +53,7 @@ STALE_STARTUP_MINUTES = 5
 STALE_PROCESSING_MINUTES = int(os.getenv("STALE_PROCESSING_MINUTES", "8"))
 OCR_PAGE_TIMEOUT_SECONDS = int(os.getenv("OCR_PAGE_TIMEOUT_SECONDS", "75"))
 OCR_PAGE_RETRIES = max(1, min(3, int(os.getenv("OCR_PAGE_RETRIES", "2"))))
+OCR_WORKERS = max(1, min(4, int(os.getenv("OCR_WORKERS", "2"))))
 UPLOAD_REVIEW_IMAGES_DURING_OCR = os.getenv("UPLOAD_REVIEW_IMAGES_DURING_OCR", "false").lower() in {"1", "true", "yes"}
 
 
@@ -357,29 +359,22 @@ def _process_upload(upload_id: str, pdf_path: str, db_url: str) -> None:
         seed_standard_templates(db, force=True)
 
         total_rows = 0
+        ocr_pages_done = 0
         last_known_date: str | None = None
         failed_pages: list[str] = []
         preferred_template_model = _template_model_from_filename(upload.original_filename)
 
-        def process_page(page_num: int, image_path: str) -> None:
-            nonlocal total_rows, last_known_date
-            upload.error_message = f"Running OCR on page {page_num}."
-            db.commit()
-            try:
-                page_result = _ocr_page_for_upload(str(upload_id), page_num, page_num, image_path)
-                result = page_result["result"]
-                review_image_path = page_result["review_image_path"]
-            except Exception as ocr_error:
-                logger.error("OCR EXCEPTION on page %d: %s", page_num, ocr_error, exc_info=True)
-                failed_pages.append(f"page {page_num}: {ocr_error}")
-                upload.processed_pages = max(upload.processed_pages or 0, page_num)
-                db.commit()
-                return
+        def save_page_result(page_result: dict) -> None:
+            nonlocal total_rows, ocr_pages_done, last_known_date
+            page_num = int(page_result["page_num"])
+            result = page_result["result"]
+            review_image_path = page_result["review_image_path"]
+            ocr_pages_done += 1
 
             if result.get("error"):
                 logger.warning("OCR error on page %d: %s", page_num, result["error"])
                 failed_pages.append(f"page {page_num}: {result['error']}")
-                upload.processed_pages = max(upload.processed_pages or 0, page_num)
+                upload.processed_pages = ocr_pages_done
                 db.commit()
                 return
 
@@ -389,7 +384,7 @@ def _process_upload(upload_id: str, pdf_path: str, db_url: str) -> None:
                 message = "OCR returned 0 rows"
                 logger.warning("%s on page %d", message, page_num)
                 failed_pages.append(f"page {page_num}: {message}")
-                upload.processed_pages = max(upload.processed_pages or 0, page_num)
+                upload.processed_pages = ocr_pages_done
                 upload.total_rows = total_rows
                 db.commit()
                 return
@@ -416,16 +411,15 @@ def _process_upload(upload_id: str, pdf_path: str, db_url: str) -> None:
                 )
                 total_rows += 1
 
-            upload.processed_pages = max(upload.processed_pages or 0, page_num)
+            upload.processed_pages = ocr_pages_done
             upload.total_rows = total_rows
             upload.error_message = f"Completed OCR for page {page_num}; {total_rows} rows saved."
             db.commit()
 
         def mark_page_rendered(page_num: int, image_path: str) -> None:
             upload.processed_pages = max(upload.processed_pages or 0, page_num)
-            upload.error_message = f"Rendered page {page_num}; OCR starting."
+            upload.error_message = f"Rendered page {page_num}; waiting for remaining pages."
             db.commit()
-            process_page(page_num, image_path)
 
         image_paths = pdf_to_images(
             pdf_path=pdf_path,
@@ -434,6 +428,35 @@ def _process_upload(upload_id: str, pdf_path: str, db_url: str) -> None:
             poppler_path=_pp or None,
             on_page_saved=mark_page_rendered,
         )
+
+        page_count = len(image_paths)
+        upload.processed_pages = 0
+        upload.error_message = f"Rendered {page_count} page(s); OCR running with {OCR_WORKERS} worker(s)."
+        db.commit()
+
+        with ThreadPoolExecutor(max_workers=min(OCR_WORKERS, max(1, page_count))) as executor:
+            futures = {
+                executor.submit(
+                    _ocr_page_for_upload,
+                    str(upload_id),
+                    page_num,
+                    page_count,
+                    image_path,
+                ): page_num
+                for page_num, image_path in enumerate(image_paths, start=1)
+            }
+            for future in as_completed(futures):
+                page_num = futures[future]
+                try:
+                    save_page_result(future.result())
+                except Exception as ocr_error:
+                    ocr_pages_done += 1
+                    logger.error("OCR EXCEPTION on page %d: %s", page_num, ocr_error, exc_info=True)
+                    failed_pages.append(f"page {page_num}: {ocr_error}")
+                    upload.processed_pages = ocr_pages_done
+                    upload.total_rows = total_rows
+                    upload.error_message = f"Page {page_num} failed; continuing remaining pages."
+                    db.commit()
 
         if failed_pages:
             upload.status = "FAILED"
@@ -632,6 +655,54 @@ def get_upload_pages(upload_id: str, db: Session = Depends(get_db)):
         })
 
     return [pages_by_number[page_num] for page_num in sorted(pages_by_number)]
+
+
+def _image_response_from_path(image_path: str | None):
+    if not image_path:
+        return None
+    if image_path.startswith(("http://", "https://")):
+        return RedirectResponse(image_path)
+
+    candidates = [Path(image_path)]
+    filename = os.path.basename(image_path)
+    if filename:
+        candidates.append(ROW_IMAGES_DIR / filename)
+
+    for candidate in candidates:
+        if candidate.exists() and candidate.is_file():
+            return FileResponse(str(candidate), media_type="image/png")
+    return None
+
+
+@router.get("/uploads/{upload_id}/page-image/{page_num}")
+def get_upload_page_image(upload_id: str, page_num: int, db: Session = Depends(get_db)):
+    """Serve the full rendered PDF page used during review."""
+    upload = db.query(Upload).filter(Upload.id == upload_id).first()
+    if not upload:
+        raise HTTPException(status_code=404, detail="Upload not found")
+
+    image_path = _page_images_for_upload(upload_id).get(page_num)
+    response = _image_response_from_path(image_path)
+    if response:
+        return response
+
+    row = db.execute(
+        text(
+            "SELECT row_image_path "
+            "FROM extracted_operations "
+            "WHERE upload_id = :uid "
+            "AND raw_ocr_json->>'page' = :page "
+            "AND row_image_path IS NOT NULL "
+            "ORDER BY id ASC "
+            "LIMIT 1"
+        ),
+        {"uid": upload_id, "page": str(page_num)},
+    ).fetchone()
+    response = _image_response_from_path(row.row_image_path if row else None)
+    if response:
+        return response
+
+    raise HTTPException(status_code=404, detail="Page image not found on server")
 
 
 @router.get("/uploads/{upload_id}/file")
