@@ -9,11 +9,16 @@ const API_BASE =
   (import.meta.env.DEV ? '/api' : '')
 
 const BASE = API_BASE.replace(/\/$/, '')
-const NGROK_SKIP_HEADER = { 'ngrok-skip-browser-warning': 'true' }
+const NGROK_SKIP_HEADER: Record<string, string> = BASE.includes('ngrok-free.app')
+  ? { 'ngrok-skip-browser-warning': 'true' }
+  : {}
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const headers = new Headers(options?.headers)
+  if (options?.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
+  Object.entries(NGROK_SKIP_HEADER).forEach(([key, value]) => headers.set(key, value))
   const res = await fetch(`${BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...NGROK_SKIP_HEADER, ...options?.headers },
+    headers,
     ...options,
   })
   if (!res.ok) {
