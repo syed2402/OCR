@@ -338,7 +338,13 @@ def _choose_model(ocr_rows: Iterable[dict], template_rows: list[dict], preferred
 def _parse_limits(text: str | None) -> tuple[float | None, float | None, float | None]:
     if not text:
         return None, None, None
-    normalized = text.replace(",", ".")
+    normalized = (
+        text.replace(",", ".")
+        .replace("=<", "<=")
+        .replace("=>", ">=")
+        .replace("≤", "<=")
+        .replace("≥", ">=")
+    )
     range_matches = re.findall(
         r"(-?\d+(?:\.\d+)?)\s*(?:nm|kg|kn|c|°c|deg|degree|degrees)?\s*(?:~|–|—|-|to)\s*"
         r"(-?\d+(?:\.\d+)?)\s*(?:nm|kg|kn|c|°c|deg|degree|degrees)?",
@@ -364,10 +370,45 @@ def _parse_limits(text: str | None) -> tuple[float | None, float | None, float |
             tolerance = float(tolerance_match.group(1)) / 100
             lower = nominal * (1 - tolerance)
             upper = nominal * (1 + tolerance)
+    if lower is None:
+        lower_match = re.search(
+            r"(?:above|minimum|min|>=|=>)\s*:?\s*-?\s*(\d+(?:\.\d+)?)|"
+            r"(\d+(?:\.\d+)?)\s*(?:nm|kg|kn|c|°c)?\s*(?:minimum|min)\b",
+            normalized,
+            flags=re.I,
+        )
+        if lower_match:
+            lower = float(next(group for group in lower_match.groups() if group is not None))
+    if upper is None:
+        upper_match = re.search(
+            r"(?:below|maximum|max|<=|=<)\s*:?\s*-?\s*(\d+(?:\.\d+)?)|"
+            r"(\d+(?:\.\d+)?)\s*(?:nm|kg|kn|c|°c)?\s*(?:maximum|max)\b",
+            normalized,
+            flags=re.I,
+        )
+        if upper_match:
+            upper = float(next(group for group in upper_match.groups() if group is not None))
     if nominal is None:
         first_number = re.search(r"-?\d+(?:\.\d+)?", normalized)
         nominal = float(first_number.group(0)) if first_number else None
+    if nominal is not None and nominal < 0 and (lower == abs(nominal) or upper == abs(nominal)):
+        nominal = abs(nominal)
+    if lower is not None and upper is not None and upper < lower:
+        upper = None
     return nominal, lower, upper
+
+
+def _parse_template_limits(template: dict) -> tuple[float | None, float | None, float | None]:
+    candidates = []
+    for text in (template.get("tightening_torque"), template.get("engineering_spec")):
+        nominal, lower, upper = _parse_limits(text)
+        score = int(lower is not None) + int(upper is not None)
+        if score:
+            candidates.append((score, nominal, lower, upper))
+    if candidates:
+        _score, nominal, lower, upper = max(candidates, key=lambda item: item[0])
+        return nominal, lower, upper
+    return _parse_limits(template.get("engineering_spec") or template.get("tightening_torque"))
 
 
 def _template_key(template: dict | None) -> tuple | None:
@@ -385,8 +426,7 @@ def _template_key(template: dict | None) -> tuple | None:
 
 def _template_enriched_row(template: dict, base: dict | None, model: str, measurements: list[float] | None = None) -> dict:
     source = base or {}
-    spec_text = template.get("engineering_spec") or template.get("tightening_torque")
-    nominal, lower, upper = _parse_limits(spec_text)
+    nominal, lower, upper = _parse_template_limits(template)
     confidence_scores = {**(source.get("confidence_scores") or {})}
     confidence_scores.update({
         "operation_number": 1.0,

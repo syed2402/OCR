@@ -103,7 +103,16 @@ def _template_limits_for_row(row: ExtractedOperation, db: Session) -> tuple[floa
             matches = process_matches
 
     for template in matches:
-        nominal, lower, upper = _parse_limits(template.engineering_spec or template.tightening_torque)
+        candidates = []
+        for text in (template.tightening_torque, template.engineering_spec):
+            nominal, lower, upper = _parse_limits(text)
+            score = int(lower is not None) + int(upper is not None)
+            if score:
+                candidates.append((score, nominal, lower, upper))
+        if candidates:
+            _score, nominal, lower, upper = max(candidates, key=lambda item: item[0])
+        else:
+            nominal, lower, upper = _parse_limits(template.engineering_spec or template.tightening_torque)
         if nominal is not None or lower is not None or upper is not None:
             return nominal, lower, upper
     return None, None, None
