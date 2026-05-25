@@ -21,12 +21,39 @@ from sqlalchemy import distinct, func
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models import ExtractedOperation
+from models import ExtractedOperation, StandardTemplateRow
+from services.standard_template import _clean_op, _parse_limits
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _APPROVED = "APPROVED"
+
+
+def _template_limits_for_row(row: ExtractedOperation, db: Session) -> tuple[float | None, float | None, float | None]:
+    op_key = _clean_op(row.operation_number)
+    if not op_key:
+        return None, None, None
+
+    templates = db.query(StandardTemplateRow).all()
+    matches = [
+        template for template in templates
+        if _clean_op(template.operation_number) == op_key
+    ]
+    if row.process_name:
+        process = row.process_name.strip()
+        process_matches = [
+            template for template in matches
+            if (template.process_name or "").strip() == process
+        ]
+        if process_matches:
+            matches = process_matches
+
+    for template in matches:
+        nominal, lower, upper = _parse_limits(template.engineering_spec or template.tightening_torque)
+        if nominal is not None or lower is not None or upper is not None:
+            return nominal, lower, upper
+    return None, None, None
 
 
 @router.get("/operations")
@@ -155,8 +182,14 @@ def get_analytics(
         measurements = r.measurements_json or []
         judgement = (r.judgement or "").upper()
         row_data = (r.raw_ocr_json or {}).get("row_data", {}) if isinstance(r.raw_ocr_json, dict) else {}
+        nominal = row_data.get("nominal")
         lower_limit = row_data.get("lower_limit")
         upper_limit = row_data.get("upper_limit")
+        if nominal is None or lower_limit is None or upper_limit is None:
+            template_nominal, template_lower, template_upper = _template_limits_for_row(r, db)
+            nominal = nominal if nominal is not None else template_nominal
+            lower_limit = lower_limit if lower_limit is not None else template_lower
+            upper_limit = upper_limit if upper_limit is not None else template_upper
 
         if judgement == "OK":
             ok_count += 1
@@ -182,7 +215,7 @@ def get_analytics(
                 "audit_date": r.audit_date.isoformat() if r.audit_date else None,
                 "measurements": measurements,
                 "judgement": r.judgement,
-                "nominal": row_data.get("nominal"),
+                "nominal": nominal,
                 "upper_limit": upper_limit,
                 "lower_limit": lower_limit,
             }
