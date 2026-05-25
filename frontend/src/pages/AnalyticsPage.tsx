@@ -8,7 +8,7 @@
  * This is enforced on the server; the frontend never overrides it.
  */
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { format, subDays, parseISO } from 'date-fns'
 import { Search, BarChart2, RefreshCw, Clock, Database, ArrowUpDown } from 'lucide-react'
 import toast from 'react-hot-toast'
@@ -35,6 +35,7 @@ export default function AnalyticsPage() {
 
   const [analytics, setAnalytics] = useState<AnalyticsResponse | null>(null)
   const [loading, setLoading] = useState(false)
+  const contentRef = useRef<HTMLDivElement | null>(null)
 
   // Derived date strings sent to API
   const startDate = useMemo(() => {
@@ -64,6 +65,20 @@ export default function AnalyticsPage() {
       .catch((e) => toast.error(`Analytics error: ${e.message}`))
       .finally(() => setLoading(false))
   }, [selectedOp, startDate, endDate])
+
+  useEffect(() => {
+    contentRef.current?.scrollTo({ top: 0, left: 0 })
+  }, [selectedOp?.operation_number, startDate, endDate])
+
+  const selectedLimits = useMemo(() => {
+    const row = analytics?.rows.find(
+      (item) => item.upper_limit !== null || item.lower_limit !== null,
+    )
+    return {
+      upper: row?.upper_limit ?? null,
+      lower: row?.lower_limit ?? null,
+    }
+  }, [analytics])
 
   const filtered = useMemo(() => {
     const searched = operations.filter(
@@ -186,6 +201,16 @@ export default function AnalyticsPage() {
                   <p className="text-sm font-medium text-gray-700">
                     {selectedOp.process_name ?? '—'}
                   </p>
+                  {(selectedLimits.upper !== null || selectedLimits.lower !== null) && (
+                    <div className="mt-2 flex flex-wrap gap-2 text-xs font-semibold">
+                      <span className="rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-red-700">
+                        Upper Limit: {selectedLimits.upper ?? '-'}
+                      </span>
+                      <span className="rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-emerald-700">
+                        Lower Limit: {selectedLimits.lower ?? '-'}
+                      </span>
+                    </div>
+                  )}
                   <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1">
                     <span className="flex items-center gap-1 text-xs text-gray-400">
                       <Database size={11} />
@@ -250,7 +275,7 @@ export default function AnalyticsPage() {
             </div>
 
             {/* Analytics content */}
-            <div className="flex-1 space-y-5 overflow-y-auto p-4 sm:p-6">
+            <div ref={contentRef} className="flex-1 space-y-5 overflow-y-auto p-4 sm:p-6">
               {analytics && (
                 <>
                   {/* OK/NOK summary cards */}
@@ -258,11 +283,23 @@ export default function AnalyticsPage() {
 
                   {/* Measurements table */}
                   <div className="card overflow-hidden">
-                    <div className="border-b border-gray-100 px-4 py-4 sm:px-5">
-                      <h3 className="font-semibold text-gray-800">Historical Measurements</h3>
-                      <p className="text-xs text-gray-400 mt-0.5">
-                        {analytics.rows.length} record(s) · approved data only
-                      </p>
+                    <div className="flex flex-wrap items-start justify-between gap-3 border-b border-gray-100 px-4 py-4 sm:px-5">
+                      <div>
+                        <h3 className="font-semibold text-gray-800">Historical Measurements</h3>
+                        <p className="text-xs text-gray-400 mt-0.5">
+                          {analytics.rows.length} record(s) · approved data only
+                        </p>
+                      </div>
+                      {(selectedLimits.upper !== null || selectedLimits.lower !== null) && (
+                        <div className="flex flex-wrap gap-2 text-xs font-semibold">
+                          <span className="rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-red-700">
+                            Upper {selectedLimits.upper ?? '-'}
+                          </span>
+                          <span className="rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-emerald-700">
+                            Lower {selectedLimits.lower ?? '-'}
+                          </span>
+                        </div>
+                      )}
                     </div>
                     <div className="overflow-x-auto">
                       <MeasurementsTable operationNumber={analytics.operation_number} rows={analytics.rows} />

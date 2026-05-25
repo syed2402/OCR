@@ -1275,7 +1275,7 @@ export default function ReviewPage() {
               columnDefs={columnDefs}
               defaultColDef={{
                 resizable: true,
-                sortable: true,
+                sortable: false,
                 filter: true,
                 editable: isEditMode,
                 suppressKeyboardEvent: ({ event }) => event.key === 'Enter' && saving,
