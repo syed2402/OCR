@@ -55,6 +55,10 @@ def _excluded_ops() -> set[str]:
     return {re.sub(r"\D", "", item) for item in re.split(r"[,;\s]+", raw) if re.sub(r"\D", "", item)}
 
 
+def default_template_model() -> str:
+    return os.getenv("DEFAULT_TEMPLATE_MODEL", "EBDT").upper()
+
+
 def _clean_text(value) -> str | None:
     if value is None:
         return None
@@ -241,14 +245,18 @@ def _choose_model(ocr_rows: Iterable[dict], template_rows: list[dict], preferred
 
     ocr_ops = [_clean_op(row.get("operation_number")) for row in ocr_rows]
     ocr_ops = [op for op in ocr_ops if op]
+    available_models = {row["model"] for row in template_rows}
+    fallback = default_template_model()
     if not ocr_ops:
-        return None
+        return fallback if fallback in available_models else next(iter(available_models), None)
 
     scores: dict[str, int] = {}
-    for model in {row["model"] for row in template_rows}:
+    for model in available_models:
         model_ops = {row["operation_number"] for row in template_rows if row["model"] == model}
         scores[model] = sum(1 for op in ocr_ops if op in model_ops)
-    return max(scores, key=scores.get) if scores else None
+    if scores and max(scores.values()) > 0:
+        return max(scores, key=scores.get)
+    return fallback if fallback in available_models else next(iter(available_models), None)
 
 
 def _parse_limits(text: str | None) -> tuple[float | None, float | None, float | None]:
@@ -286,7 +294,8 @@ def apply_standard_template(
     template_rows = _load_db_template_rows(db)
     model = _choose_model(ocr_rows, template_rows, preferred_model)
     if not model:
-        return ocr_rows, None
+        logger.warning("No standard template model available; refusing to save guessed printed rows.")
+        return [], None
 
     by_op: dict[str, list[dict]] = {}
     for template in template_rows:

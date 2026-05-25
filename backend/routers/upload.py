@@ -26,7 +26,7 @@ from models import ExtractedOperation, Upload
 from services.cloud_storage import upload_review_image
 from services.ocr_service import extract_from_image
 from services.pdf_processor import pdf_to_images, resolve_poppler_path
-from services.standard_template import apply_standard_template
+from services.standard_template import apply_standard_template, default_template_model
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -77,7 +77,7 @@ def _template_model_from_filename(filename: str | None) -> str | None:
         return "EBDT"
     if "EBNA" in upper:
         return "EBNA"
-    return None
+    return default_template_model()
 
 
 # ---------------------------------------------------------------------------
