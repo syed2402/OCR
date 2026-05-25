@@ -12,6 +12,8 @@ Flow:
 
 import logging
 import os
+import queue
+import threading
 import time
 import uuid
 from datetime import date, datetime, timedelta
@@ -19,7 +21,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from database import get_db
@@ -48,6 +50,7 @@ UPLOAD_DIR = _backend_path("UPLOAD_DIR", "static/uploads")
 ROW_IMAGES_DIR = _backend_path("ROW_IMAGES_DIR", "static/row_images")
 STALE_STARTUP_MINUTES = 5
 STALE_PROCESSING_MINUTES = int(os.getenv("STALE_PROCESSING_MINUTES", "8"))
+OCR_PAGE_TIMEOUT_SECONDS = int(os.getenv("OCR_PAGE_TIMEOUT_SECONDS", "210"))
 
 
 def _quantity_from_row_data(row_data: dict) -> int | None:
@@ -71,7 +74,61 @@ def _machine_values_for_quantity(row_data: dict, quantity: int | None) -> list[f
     return values
 
 
-def _reconcile_stale_processing_upload(upload: Upload, db: Session) -> bool:
+def _extract_from_image_with_timeout(image_path: str) -> dict:
+    results: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1)
+
+    def run() -> None:
+        try:
+            results.put(("ok", extract_from_image(image_path)))
+        except Exception as exc:
+            results.put(("error", exc))
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    try:
+        status, payload = results.get(timeout=OCR_PAGE_TIMEOUT_SECONDS)
+    except queue.Empty:
+        return {
+            "audit_date": None,
+            "sheet_type": "TORQUE",
+            "rows": [],
+            "raw_response": "",
+            "error": f"OCR timed out after {OCR_PAGE_TIMEOUT_SECONDS} seconds",
+        }
+
+    if status == "error":
+        raise payload
+    return payload
+
+
+def _page_images_for_upload(upload_id: str) -> dict[int, str]:
+    images: dict[int, str] = {}
+    for img_path in ROW_IMAGES_DIR.glob(f"{upload_id}_page_*.png"):
+        try:
+            page_num = int(img_path.name.split("_page_")[1].split(".")[0])
+        except (IndexError, ValueError):
+            continue
+        images[page_num] = str(img_path)
+    return images
+
+
+def _pages_with_rows(db: Session, upload_id: str) -> set[int]:
+    rows = db.execute(
+        text(
+            "SELECT DISTINCT (raw_ocr_json->>'page')::int AS p "
+            "FROM extracted_operations "
+            "WHERE upload_id = :uid AND raw_ocr_json->>'page' IS NOT NULL"
+        ),
+        {"uid": upload_id},
+    ).fetchall()
+    return {int(row.p) for row in rows if row.p is not None}
+
+
+def _reconcile_stale_processing_upload(
+    upload: Upload,
+    db: Session,
+    background_tasks: BackgroundTasks | None = None,
+) -> bool:
     """Recover Render uploads when the in-process background task stops mid-run."""
     if upload.status != "PROCESSING" or not upload.created_at:
         return False
@@ -106,17 +163,38 @@ def _reconcile_stale_processing_upload(upload: Upload, db: Session) -> bool:
     if now - last_progress_at <= timedelta(minutes=STALE_PROCESSING_MINUTES):
         return changed
 
-    if row_count > 0:
-        upload.status = "COMPLETED"
-        upload.total_rows = row_count
+    page_images = _page_images_for_upload(str(upload.id))
+    missing_pages = sorted(set(page_images) - _pages_with_rows(db, str(upload.id)))
+    if row_count > 0 and missing_pages and background_tasks is not None:
+        if upload.completed_at and now - upload.completed_at <= timedelta(minutes=STALE_PROCESSING_MINUTES):
+            return changed
+        db_url = os.getenv(
+            "DATABASE_URL",
+            "postgresql://quality_user:quality_pass@localhost:5432/stellantis_quality",
+        )
+        background_tasks.add_task(_resume_missing_pages_background, str(upload.id), missing_pages, db_url)
         upload.error_message = (
-            f"Render processing stopped after {row_count} rows; saved rows are available for review."
+            "Render worker paused; resuming OCR for missing page(s): "
+            + ", ".join(map(str, missing_pages))
         )
         upload.completed_at = now
         return True
 
+    if row_count > 0 and not missing_pages:
+        upload.status = "COMPLETED"
+        upload.total_rows = row_count
+        upload.error_message = None
+        upload.completed_at = now
+        return True
+
     upload.status = "FAILED"
-    upload.error_message = "Processing timed out before any rows were saved. Please retry the upload."
+    if missing_pages:
+        upload.error_message = (
+            "Processing timed out before all pages finished. Missing page(s): "
+            + ", ".join(map(str, missing_pages))
+        )
+    else:
+        upload.error_message = "Processing timed out before any rows were saved. Please retry the upload."
     upload.completed_at = now
     return True
 
@@ -264,9 +342,9 @@ def _process_upload(upload_id: str, pdf_path: str, db_url: str) -> None:
             logger.info("PROCESSING PAGE %d/%d: %s", page_num, len(image_paths), image_path)
             logger.info("=" * 70)
             review_image_path = upload_review_image(image_path, upload_id, page_num) or image_path
-            
+
             try:
-                result = extract_from_image(image_path)
+                result = _extract_from_image_with_timeout(image_path)
                 logger.info("OCR result keys: %s", list(result.keys()))
                 logger.info("Error in result: %s", result.get("error"))
                 logger.info("Rows in result: %d", len(result.get("rows", [])))
@@ -411,13 +489,17 @@ async def upload_pdf(
 
 
 @router.get("/uploads/{upload_id}/status")
-def get_upload_status(upload_id: str, db: Session = Depends(get_db)):
+def get_upload_status(
+    upload_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
     """Poll this endpoint to track processing progress."""
     upload = db.query(Upload).filter(Upload.id == upload_id).first()
     if not upload:
         raise HTTPException(status_code=404, detail="Upload not found")
 
-    if _reconcile_stale_processing_upload(upload, db):
+    if _reconcile_stale_processing_upload(upload, db, background_tasks):
         db.commit()
         db.refresh(upload)
 
@@ -538,6 +620,17 @@ def get_upload_file(upload_id: str, db: Session = Depends(get_db)):
     )
 
 
+def _resume_missing_pages_background(upload_id: str, missing_pages: list[int], db_url: str) -> None:
+    logger.info("Resuming upload %s for missing pages: %s", upload_id, missing_pages)
+    page_images = _page_images_for_upload(upload_id)
+    for page_num in missing_pages:
+        image_path = page_images.get(page_num)
+        if not image_path:
+            logger.warning("Cannot resume upload %s page %d: page image missing", upload_id, page_num)
+            continue
+        _retry_page_background(upload_id, page_num, image_path, db_url)
+
+
 def _retry_page_background(upload_id: str, page_num: int, image_path: str, db_url: str) -> None:
     from dotenv import load_dotenv
     load_dotenv(ENV_PATH, override=True)
@@ -552,7 +645,7 @@ def _retry_page_background(upload_id: str, page_num: int, image_path: str, db_ur
     try:
         logger.info("Retrying OCR for upload %s page %d", upload_id, page_num)
         review_image_path = upload_review_image(image_path, upload_id, page_num) or image_path
-        result = extract_from_image(image_path)
+        result = _extract_from_image_with_timeout(image_path)
 
         if result.get("error"):
             logger.warning("Retry OCR error on page %d: %s", page_num, result["error"])
@@ -717,12 +810,12 @@ def delete_upload(upload_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/uploads")
-def list_uploads(db: Session = Depends(get_db)):
+def list_uploads(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """Return all uploads ordered by most recent first."""
     uploads = db.query(Upload).order_by(Upload.created_at.desc()).limit(50).all()
     changed = False
     for upload in uploads:
-        changed = _reconcile_stale_processing_upload(upload, db) or changed
+        changed = _reconcile_stale_processing_upload(upload, db, background_tasks) or changed
     if changed:
         db.commit()
         for upload in uploads:
