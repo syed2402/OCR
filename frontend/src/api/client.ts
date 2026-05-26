@@ -108,6 +108,8 @@ export interface AnalyticsStats {
   ok_pct: number
   nok_pct: number
   avg_torque: number | null
+  min_torque: number | null
+  max_torque: number | null
   cp: number | null
   cpk: number | null
 }

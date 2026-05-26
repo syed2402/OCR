@@ -1,4 +1,4 @@
-import { CheckCircle, XCircle, Hash, AlertTriangle, Gauge, Sigma } from 'lucide-react'
+import { CheckCircle, XCircle, Hash, AlertTriangle, Gauge, ArrowDown, ArrowUp } from 'lucide-react'
 import { AnalyticsStats } from '../api/client'
 
 interface Props {
@@ -14,10 +14,10 @@ interface CardProps {
 }
 
 const ACCENT = {
-  green:  { bg: 'bg-green-50',  icon: 'bg-green-100',  val: 'text-green-700',  border: 'border-green-200' },
-  red:    { bg: 'bg-red-50',    icon: 'bg-red-100',    val: 'text-red-600',    border: 'border-red-200' },
-  blue:   { bg: 'bg-blue-50',   icon: 'bg-blue-100',   val: 'text-blue-700',   border: 'border-blue-200' },
-  amber:  { bg: 'bg-amber-50',  icon: 'bg-amber-100',  val: 'text-amber-700',  border: 'border-amber-200' },
+  green: { bg: 'bg-green-50', icon: 'bg-green-100', val: 'text-green-700', border: 'border-green-200' },
+  red: { bg: 'bg-red-50', icon: 'bg-red-100', val: 'text-red-600', border: 'border-red-200' },
+  blue: { bg: 'bg-blue-50', icon: 'bg-blue-100', val: 'text-blue-700', border: 'border-blue-200' },
+  amber: { bg: 'bg-amber-50', icon: 'bg-amber-100', val: 'text-amber-700', border: 'border-amber-200' },
   purple: { bg: 'bg-purple-50', icon: 'bg-purple-100', val: 'text-purple-700', border: 'border-purple-200' },
 }
 
@@ -38,7 +38,7 @@ function Card({ icon, value, label, sub, accent }: CardProps) {
 }
 
 export default function OkNokSummary({ stats }: Props) {
-  const { total, ok_count, nok_count, ok_pct, nok_pct, avg_torque, cp, cpk } = stats
+  const { total, ok_count, nok_count, ok_pct, nok_pct, avg_torque, min_torque, max_torque } = stats
 
   return (
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-7">
@@ -73,23 +73,23 @@ export default function OkNokSummary({ stats }: Props) {
       <Card
         accent="purple"
         icon={<Gauge className="text-purple-600" size={20} />}
-        value={avg_torque != null ? String(avg_torque) : '—'}
+        value={avg_torque != null ? String(avg_torque) : '-'}
         label="Avg Torque"
         sub="across all measurements"
       />
       <Card
         accent="blue"
-        icon={<Sigma className="text-blue-600" size={20} />}
-        value={cp != null ? String(cp) : '—'}
-        label="Cp"
-        sub="process capability"
+        icon={<ArrowDown className="text-blue-600" size={20} />}
+        value={min_torque != null ? String(min_torque) : '-'}
+        label="Minimum Torque"
+        sub="lowest measurement"
       />
       <Card
         accent="green"
-        icon={<Sigma className="text-green-600" size={20} />}
-        value={cpk != null ? String(cpk) : '—'}
-        label="Cpk"
-        sub="centered capability"
+        icon={<ArrowUp className="text-green-600" size={20} />}
+        value={max_torque != null ? String(max_torque) : '-'}
+        label="Maximum Torque"
+        sub="highest measurement"
       />
     </div>
   )

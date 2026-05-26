@@ -305,6 +305,8 @@ def get_analytics(
     ok_pct = round(ok_count / total * 100, 1) if total else 0
     nok_pct = round(nok_count / total * 100, 1) if total else 0
     avg_torque = round(sum(all_measurements) / len(all_measurements), 2) if all_measurements else None
+    min_torque = round(min(all_measurements), 2) if all_measurements else None
+    max_torque = round(max(all_measurements), 2) if all_measurements else None
     cp, cpk = _capability_indices(all_measurements, lower_limits, upper_limits)
 
     return {
@@ -318,6 +320,8 @@ def get_analytics(
             "ok_pct": ok_pct,
             "nok_pct": nok_pct,
             "avg_torque": avg_torque,
+            "min_torque": min_torque,
+            "max_torque": max_torque,
             "cp": cp,
             "cpk": cpk,
         },
