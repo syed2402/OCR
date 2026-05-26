@@ -39,6 +39,7 @@ function Card({ icon, value, label, sub, accent }: CardProps) {
 
 export default function OkNokSummary({ stats }: Props) {
   const { total, ok_count, nok_count, ok_pct, nok_pct, avg_torque, min_torque, max_torque } = stats
+  const countLabel = avg_torque != null ? 'measurements' : 'records'
 
   return (
     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-7">
@@ -54,14 +55,14 @@ export default function OkNokSummary({ stats }: Props) {
         icon={<CheckCircle className="text-green-600" size={20} />}
         value={`${ok_pct}%`}
         label="OK Rate"
-        sub={`${ok_count} records`}
+        sub={`${ok_count} ${countLabel}`}
       />
       <Card
         accent="red"
         icon={<XCircle className="text-red-500" size={20} />}
         value={`${nok_pct}%`}
         label="NG Rate"
-        sub={`${nok_count} records`}
+        sub={`${nok_count} ${countLabel}`}
       />
       <Card
         accent="amber"

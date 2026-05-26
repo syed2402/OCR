@@ -226,6 +226,8 @@ def get_analytics(
                 "ok_pct": 0,
                 "nok_pct": 0,
                 "avg_torque": None,
+                "min_torque": None,
+                "max_torque": None,
                 "cp": None,
                 "cpk": None,
             },
@@ -234,8 +236,11 @@ def get_analytics(
     process_name = rows[0].process_name
 
     serialised_rows = []
-    ok_count = 0
-    nok_count = 0
+    row_ok_count = 0
+    row_nok_count = 0
+    measurement_ok_count = 0
+    measurement_ng_count = 0
+    measurement_status_count = 0
     all_measurements: list[float] = []
     lower_limits: list[float] = []
     upper_limits: list[float] = []
@@ -268,13 +273,22 @@ def get_analytics(
             upper_limit = upper_limit if upper_limit is not None else template_upper
 
         if judgement == "OK":
-            ok_count += 1
+            row_ok_count += 1
         elif judgement in {"NOK", "NG"}:
-            nok_count += 1
+            row_nok_count += 1
 
         for m in measurements:
             try:
-                all_measurements.append(float(m))
+                value = float(m)
+                all_measurements.append(value)
+                if lower_limit is not None and upper_limit is not None:
+                    lower_value = float(lower_limit)
+                    upper_value = float(upper_limit)
+                    measurement_status_count += 1
+                    if lower_value <= value <= upper_value:
+                        measurement_ok_count += 1
+                    else:
+                        measurement_ng_count += 1
             except (TypeError, ValueError):
                 pass
         try:
@@ -302,8 +316,16 @@ def get_analytics(
         )
 
     total = len(rows)
-    ok_pct = round(ok_count / total * 100, 1) if total else 0
-    nok_pct = round(nok_count / total * 100, 1) if total else 0
+    if measurement_status_count:
+        ok_count = measurement_ok_count
+        nok_count = measurement_ng_count
+        pct_total = measurement_status_count
+    else:
+        ok_count = row_ok_count
+        nok_count = row_nok_count
+        pct_total = total
+    ok_pct = round(ok_count / pct_total * 100, 1) if pct_total else 0
+    nok_pct = round(nok_count / pct_total * 100, 1) if pct_total else 0
     avg_torque = round(sum(all_measurements) / len(all_measurements), 2) if all_measurements else None
     min_torque = round(min(all_measurements), 2) if all_measurements else None
     max_torque = round(max(all_measurements), 2) if all_measurements else None
