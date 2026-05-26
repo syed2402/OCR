@@ -166,9 +166,9 @@ export default function MeasurementsTable({ operationNumber, rows }: Props) {
               measurementCountForColumn,
             ],
             ['OK count', okCountForColumn],
-            ['NOK count', nokCountForColumn],
+            ['NG count', nokCountForColumn],
             [
-              'NOK %',
+              'NG %',
               (columnKey: string) => {
                 const total = measurementCountForColumn(columnKey)
                 return total ? `${((nokCountForColumn(columnKey) / total) * 100).toFixed(1)}%` : ''

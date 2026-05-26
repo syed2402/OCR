@@ -60,14 +60,14 @@ export default function OkNokSummary({ stats }: Props) {
         accent="red"
         icon={<XCircle className="text-red-500" size={20} />}
         value={`${nok_pct}%`}
-        label="NOK Rate"
+        label="NG Rate"
         sub={`${nok_count} records`}
       />
       <Card
         accent="amber"
         icon={<AlertTriangle className="text-amber-600" size={20} />}
         value={String(nok_count)}
-        label="NOK Count"
+        label="NG Count"
         sub="failures detected"
       />
       <Card

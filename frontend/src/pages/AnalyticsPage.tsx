@@ -2,7 +2,7 @@
  * Screen 3 — Analytics Explorer
  *
  * Left sidebar: searchable operation list (APPROVED data only).
- * Main area: date filter → measurements table + trend chart + OK/NOK stats.
+ * Main area: date filter → measurements table + trend chart + OK/NG stats.
  *
  * ALL data shown here comes from review_status = 'APPROVED' rows only.
  * This is enforced on the server; the frontend never overrides it.
@@ -129,7 +129,7 @@ export default function AnalyticsPage() {
             >
               <option value="alpha">A → Z</option>
               <option value="records">Most Records</option>
-              <option value="nok">Highest NOK</option>
+              <option value="nok">Highest NG</option>
               <option value="recent">Most Recent</option>
             </select>
           </div>
@@ -158,7 +158,7 @@ export default function AnalyticsPage() {
                 </p>
                 {op.nok_count > 0 && (
                   <span className="text-xs font-semibold bg-red-100 text-red-700 px-1.5 py-0.5 rounded-full shrink-0">
-                    {op.nok_count} NOK
+                    {op.nok_count} NG
                   </span>
                 )}
               </div>
@@ -278,7 +278,7 @@ export default function AnalyticsPage() {
             <div ref={contentRef} className="flex-1 space-y-5 overflow-y-auto p-4 sm:p-6">
               {analytics && (
                 <>
-                  {/* OK/NOK summary cards */}
+                  {/* OK/NG summary cards */}
                   <OkNokSummary stats={analytics.stats} />
 
                   {/* Measurements table */}
