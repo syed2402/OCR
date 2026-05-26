@@ -80,6 +80,10 @@ export default function AnalyticsPage() {
     }
   }, [analytics])
 
+  const measurementCount = useMemo(() => {
+    return analytics?.rows.reduce((sum, row) => sum + row.measurements.length, 0) ?? 0
+  }, [analytics])
+
   const filtered = useMemo(() => {
     const searched = operations.filter(
       (op) =>
@@ -201,20 +205,10 @@ export default function AnalyticsPage() {
                   <p className="text-sm font-medium text-gray-700">
                     {selectedOp.process_name ?? '—'}
                   </p>
-                  {(selectedLimits.upper !== null || selectedLimits.lower !== null) && (
-                    <div className="mt-2 flex flex-wrap gap-2 text-xs font-semibold">
-                      <span className="rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-red-700">
-                        Upper Limit: {selectedLimits.upper ?? '-'}
-                      </span>
-                      <span className="rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-emerald-700">
-                        Lower Limit: {selectedLimits.lower ?? '-'}
-                      </span>
-                    </div>
-                  )}
                   <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1">
                     <span className="flex items-center gap-1 text-xs text-gray-400">
                       <Database size={11} />
-                      {analytics ? analytics.stats.total : selectedOp.approved_count} historical records
+                      {analytics ? measurementCount : selectedOp.approved_count} measurements
                     </span>
                     {analytics?.rows.length ? (
                       <span className="flex items-center gap-1 text-xs text-gray-400">
@@ -287,19 +281,9 @@ export default function AnalyticsPage() {
                       <div>
                         <h3 className="font-semibold text-gray-800">Historical Measurements</h3>
                         <p className="text-xs text-gray-400 mt-0.5">
-                          {analytics.rows.length} record(s) · approved data only
+                          {measurementCount} measurement(s) · approved data only
                         </p>
                       </div>
-                      {(selectedLimits.upper !== null || selectedLimits.lower !== null) && (
-                        <div className="flex flex-wrap gap-2 text-xs font-semibold">
-                          <span className="rounded-md border border-red-200 bg-red-50 px-2.5 py-1 text-red-700">
-                            Upper {selectedLimits.upper ?? '-'}
-                          </span>
-                          <span className="rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-emerald-700">
-                            Lower {selectedLimits.lower ?? '-'}
-                          </span>
-                        </div>
-                      )}
                     </div>
                     <div className="overflow-x-auto">
                       <MeasurementsTable operationNumber={analytics.operation_number} rows={analytics.rows} />

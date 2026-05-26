@@ -24,6 +24,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFi
 from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.exc import StaleDataError
 
 from database import get_db
 from models import ExtractedOperation, Upload
@@ -49,13 +50,16 @@ def _backend_path(env_name: str, default: str) -> Path:
 
 UPLOAD_DIR = _backend_path("UPLOAD_DIR", "static/uploads")
 ROW_IMAGES_DIR = _backend_path("ROW_IMAGES_DIR", "static/row_images")
-STALE_STARTUP_MINUTES = 5
+STALE_STARTUP_MINUTES = int(os.getenv("STALE_STARTUP_MINUTES", "20"))
 STALE_PROCESSING_MINUTES = int(os.getenv("STALE_PROCESSING_MINUTES", "8"))
 OCR_PAGE_TIMEOUT_SECONDS = int(os.getenv("OCR_PAGE_TIMEOUT_SECONDS", "75"))
 OCR_PAGE_RETRIES = max(1, min(3, int(os.getenv("OCR_PAGE_RETRIES", "2"))))
 OCR_WORKERS = max(1, min(4, int(os.getenv("OCR_WORKERS", "1"))))
 UPLOAD_REVIEW_IMAGES_DURING_OCR = os.getenv("UPLOAD_REVIEW_IMAGES_DURING_OCR", "false").lower() in {"1", "true", "yes"}
 PROCESS_UPLOAD_INLINE = os.getenv("PROCESS_UPLOAD_INLINE", "false").lower() in {"1", "true", "yes"}
+DUPLICATE_UPLOAD_WINDOW_MINUTES = int(os.getenv("DUPLICATE_UPLOAD_WINDOW_MINUTES", "10"))
+
+_UPLOAD_PROCESS_LOCK = threading.Lock()
 
 
 def _quantity_from_row_data(row_data: dict) -> int | None:
@@ -160,6 +164,33 @@ def _pages_with_rows(db: Session, upload_id: str) -> set[int]:
     return {int(row.p) for row in rows if row.p is not None}
 
 
+def _set_upload_message(upload_id: str, db_url: str, message: str) -> None:
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    engine = create_engine(db_url, pool_pre_ping=True)
+    Session = sessionmaker(bind=engine)
+    db = Session()
+    try:
+        upload = db.query(Upload).filter(Upload.id == upload_id).first()
+        if upload and upload.status == "PROCESSING":
+            upload.error_message = message
+            db.commit()
+    except StaleDataError:
+        db.rollback()
+        logger.warning("Upload %s changed while updating status message", upload_id)
+    finally:
+        db.close()
+
+
+def _process_upload_queued(upload_id: str, pdf_path: str, db_url: str) -> None:
+    if _UPLOAD_PROCESS_LOCK.locked():
+        _set_upload_message(upload_id, db_url, "Queued for OCR processing. Waiting for another upload to finish.")
+    with _UPLOAD_PROCESS_LOCK:
+        _set_upload_message(upload_id, db_url, "OCR processing started.")
+        _process_upload(upload_id, pdf_path, db_url)
+
+
 def _reconcile_stale_processing_upload(
     upload: Upload,
     db: Session,
@@ -188,6 +219,14 @@ def _reconcile_stale_processing_upload(
     if row_count and row_count != (upload.total_rows or 0):
         upload.total_rows = row_count
         changed = True
+
+    if (
+        row_count == 0
+        and (upload.processed_pages or 0) == 0
+        and upload.error_message
+        and upload.error_message.startswith("Queued for OCR processing")
+    ):
+        return changed
 
     page_images = _page_images_for_upload(str(upload.id))
     if (
@@ -474,9 +513,16 @@ def _process_upload(upload_id: str, pdf_path: str, db_url: str) -> None:
             upload_id, upload.status, total_rows, len(image_paths),
         )
 
+    except StaleDataError:
+        logger.warning("Upload %s changed or was deleted during processing; stopping worker gracefully", upload_id)
+        try:
+            db.rollback()
+        except Exception:
+            pass
     except Exception as exc:
         logger.exception("Fatal error processing upload %s", upload_id)
         try:
+            db.rollback()
             upload = db.query(Upload).filter(Upload.id == upload_id).first()
             if upload:
                 upload.status = "FAILED"
@@ -505,6 +551,24 @@ async def upload_pdf(
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     ROW_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
+    duplicate_cutoff = datetime.utcnow() - timedelta(minutes=DUPLICATE_UPLOAD_WINDOW_MINUTES)
+    duplicate = (
+        db.query(Upload)
+        .filter(Upload.original_filename == file.filename)
+        .filter(Upload.status == "PROCESSING")
+        .filter(Upload.created_at >= duplicate_cutoff)
+        .order_by(Upload.created_at.desc())
+        .first()
+    )
+    if duplicate:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This file is already processing. "
+                f"Upload id: {duplicate.id}"
+            ),
+        )
+
     upload_id = str(uuid.uuid4())
     safe_name = f"{upload_id}.pdf"
     pdf_path = UPLOAD_DIR / safe_name
@@ -518,6 +582,7 @@ async def upload_pdf(
         original_filename=file.filename,
         pdf_path=str(pdf_path),
         status="PROCESSING",
+        error_message="Queued for OCR processing.",
     )
     db.add(upload)
     db.commit()
@@ -527,9 +592,9 @@ async def upload_pdf(
         "postgresql://quality_user:quality_pass@localhost:5432/stellantis_quality",
     )
     if PROCESS_UPLOAD_INLINE:
-        _process_upload(upload_id, str(pdf_path), db_url)
+        _process_upload_queued(upload_id, str(pdf_path), db_url)
     else:
-        background_tasks.add_task(_process_upload, upload_id, str(pdf_path), db_url)
+        background_tasks.add_task(_process_upload_queued, upload_id, str(pdf_path), db_url)
 
     return {
         "status": "success",

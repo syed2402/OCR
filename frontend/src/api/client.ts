@@ -110,6 +110,8 @@ export interface AnalyticsStats {
   avg_torque: number | null
   min_torque: number | null
   max_torque: number | null
+  lower_proximity_count: number
+  upper_proximity_count: number
   cp: number | null
   cpk: number | null
 }

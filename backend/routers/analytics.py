@@ -228,6 +228,8 @@ def get_analytics(
                 "avg_torque": None,
                 "min_torque": None,
                 "max_torque": None,
+                "lower_proximity_count": 0,
+                "upper_proximity_count": 0,
                 "cp": None,
                 "cpk": None,
             },
@@ -241,6 +243,8 @@ def get_analytics(
     measurement_ok_count = 0
     measurement_ng_count = 0
     measurement_status_count = 0
+    lower_proximity_count = 0
+    upper_proximity_count = 0
     all_measurements: list[float] = []
     lower_limits: list[float] = []
     upper_limits: list[float] = []
@@ -284,11 +288,17 @@ def get_analytics(
                 if lower_limit is not None and upper_limit is not None:
                     lower_value = float(lower_limit)
                     upper_value = float(upper_limit)
+                    proximity_width = (upper_value - lower_value) * 0.10
                     measurement_status_count += 1
                     if lower_value <= value <= upper_value:
                         measurement_ok_count += 1
                     else:
                         measurement_ng_count += 1
+                    if proximity_width > 0:
+                        if lower_value <= value <= lower_value + proximity_width:
+                            lower_proximity_count += 1
+                        if upper_value - proximity_width <= value <= upper_value:
+                            upper_proximity_count += 1
             except (TypeError, ValueError):
                 pass
         try:
@@ -344,6 +354,8 @@ def get_analytics(
             "avg_torque": avg_torque,
             "min_torque": min_torque,
             "max_torque": max_torque,
+            "lower_proximity_count": lower_proximity_count,
+            "upper_proximity_count": upper_proximity_count,
             "cp": cp,
             "cpk": cpk,
         },

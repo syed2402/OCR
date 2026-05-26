@@ -1,4 +1,4 @@
-import { CheckCircle, XCircle, Hash, AlertTriangle, Gauge, ArrowDown, ArrowUp } from 'lucide-react'
+import { XCircle, Hash, AlertTriangle, Gauge, ArrowDown, ArrowUp, ChevronsDown, ChevronsUp } from 'lucide-react'
 import { AnalyticsStats } from '../api/client'
 
 interface Props {
@@ -24,38 +24,42 @@ const ACCENT = {
 function Card({ icon, value, label, sub, accent }: CardProps) {
   const c = ACCENT[accent]
   return (
-    <div className={`min-w-0 rounded-xl border ${c.border} ${c.bg} p-4 flex items-center gap-3`}>
-      <div className={`h-10 w-10 ${c.icon} rounded-xl flex items-center justify-center shrink-0`}>
+    <div className={`min-w-[168px] rounded-lg border ${c.border} ${c.bg} px-4 py-3 flex items-center gap-3`}>
+      <div className={`h-9 w-9 ${c.icon} rounded-lg flex items-center justify-center shrink-0`}>
         {icon}
       </div>
       <div className="min-w-0">
-        <p className={`truncate text-2xl font-bold ${c.val} leading-tight`}>{value}</p>
-        <p className="mt-0.5 break-words text-sm leading-snug text-gray-600">{label}</p>
-        <p className="mt-0.5 break-words text-xs leading-snug text-gray-400">{sub}</p>
+        <p className={`text-xl font-bold ${c.val} leading-tight`}>{value}</p>
+        <p className="mt-0.5 whitespace-nowrap text-sm leading-snug text-gray-700">{label}</p>
+        <p className="mt-0.5 whitespace-nowrap text-xs leading-snug text-gray-400">{sub}</p>
       </div>
     </div>
   )
 }
 
 export default function OkNokSummary({ stats }: Props) {
-  const { total, ok_count, nok_count, ok_pct, nok_pct, avg_torque, min_torque, max_torque } = stats
+  const {
+    total,
+    ok_count,
+    nok_count,
+    nok_pct,
+    avg_torque,
+    min_torque,
+    max_torque,
+    lower_proximity_count,
+    upper_proximity_count,
+  } = stats
+  const measurementCount = ok_count + nok_count
   const countLabel = avg_torque != null ? 'measurements' : 'records'
 
   return (
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-7">
+    <div className="flex gap-3 overflow-x-auto pb-1">
       <Card
         accent="blue"
         icon={<Hash className="text-blue-600" size={20} />}
-        value={String(total)}
-        label="Total Records"
-        sub="approved data only"
-      />
-      <Card
-        accent="green"
-        icon={<CheckCircle className="text-green-600" size={20} />}
-        value={`${ok_pct}%`}
-        label="OK Rate"
-        sub={`${ok_count} ${countLabel}`}
+        value={String(measurementCount || total)}
+        label="Measurements"
+        sub="approved only"
       />
       <Card
         accent="red"
@@ -69,28 +73,42 @@ export default function OkNokSummary({ stats }: Props) {
         icon={<AlertTriangle className="text-amber-600" size={20} />}
         value={String(nok_count)}
         label="NG Count"
-        sub="failures detected"
+        sub={countLabel}
       />
       <Card
         accent="purple"
         icon={<Gauge className="text-purple-600" size={20} />}
         value={avg_torque != null ? String(avg_torque) : '-'}
-        label="Avg Torque"
-        sub="across all measurements"
+        label="Average"
+        sub="torque"
       />
       <Card
         accent="blue"
         icon={<ArrowDown className="text-blue-600" size={20} />}
         value={min_torque != null ? String(min_torque) : '-'}
-        label="Minimum Torque"
-        sub="lowest measurement"
+        label="Minimum"
+        sub="torque"
       />
       <Card
         accent="green"
         icon={<ArrowUp className="text-green-600" size={20} />}
         value={max_torque != null ? String(max_torque) : '-'}
-        label="Maximum Torque"
-        sub="highest measurement"
+        label="Maximum"
+        sub="torque"
+      />
+      <Card
+        accent="blue"
+        icon={<ChevronsDown className="text-blue-600" size={20} />}
+        value={String(lower_proximity_count ?? 0)}
+        label="Lower Zone"
+        sub="bottom 10%"
+      />
+      <Card
+        accent="amber"
+        icon={<ChevronsUp className="text-amber-600" size={20} />}
+        value={String(upper_proximity_count ?? 0)}
+        label="Upper Zone"
+        sub="top 10%"
       />
     </div>
   )
